@@ -18,8 +18,7 @@ class TextVoiceLangSplit(Star):
     async def initialize(self):
         voice_lang = self.config.get("voice_language", "Japanese")
         logger.info(
-            f"[text_voice_lang_split] Plugin initialized, "
-            f"voice_language={voice_lang}"
+            f"[text_voice_lang_split] Plugin initialized, voice_language={voice_lang}"
         )
 
     async def _translate_text(self, text: str, event: AstrMessageEvent) -> str | None:
@@ -81,10 +80,7 @@ class TextVoiceLangSplit(Star):
         if len(full_text.strip()) < 2:
             return
 
-        logger.info(
-            f"[text_voice_lang_split] Translating: "
-            f"'{full_text[:50]}...'"
-        )
+        logger.info(f"[text_voice_lang_split] Translating: '{full_text[:50]}...'")
 
         translated = await self._translate_text(full_text, event)
         if not translated:
@@ -100,9 +96,7 @@ class TextVoiceLangSplit(Star):
             )
             return
 
-        result.chain.append(
-            Record(file=audio_path, url=audio_path, text=translated)
-        )
+        result.chain.append(Record(file=audio_path, url=audio_path, text=translated))
         result.result_content_type = ResultContentType.GENERAL_RESULT
         result.use_t2i_ = False
 
@@ -130,8 +124,7 @@ class TextVoiceLangSplit(Star):
             return
 
         logger.info(
-            f"[text_voice_lang_split] Streaming: translating "
-            f"'{accumulated[:50]}...'"
+            f"[text_voice_lang_split] Streaming: translating '{accumulated[:50]}...'"
         )
 
         translated = await self._translate_text(accumulated, event)
