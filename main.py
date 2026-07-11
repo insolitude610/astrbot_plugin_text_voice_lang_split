@@ -35,11 +35,17 @@ class TextVoiceLangSplit(Star):
             prompt = f"{prompt}\nAdditional instructions: {custom_instructions}"
 
         try:
-            provider_id = self.config.get("translate_provider", "").strip()
+            provider_id = (
+                event.get_extra("selected_provider")
+                or self.config.get("translate_provider", "").strip()
+            )
             if not provider_id:
                 provider_id = await self.context.get_current_chat_provider_id(
                     umo=event.unified_msg_origin
                 )
+            logger.debug(
+                f"[text_voice_lang_split] Translating with provider: {provider_id}"
+            )
             coro = self.context.llm_generate(
                 chat_provider_id=provider_id,
                 prompt=f"{prompt}\n\nText: {text}",

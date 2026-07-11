@@ -6,6 +6,8 @@
 - 新增 `tts_max_chars` 配置项，译文超长时自动跳过 TTS，适合长回复场景
 - 新增 `translate_timeout` 配置项，翻译 LLM 请求超时自动回退，避免阻塞管线
 - 新增 `translate_provider` 配置项，支持为翻译指定独立 LLM Provider
+- 修复翻译 Provider 未跟随聊天 `/provider` 切换的问题（现在优先读取 event selected_provider）
+- 修复翻译失败/超长/TTS 失败等提前 return 路径未阻断内置 TTS 的 bug
 
 ## v1.0.0
 
