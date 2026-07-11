@@ -16,18 +16,14 @@ class TextVoiceLangSplit(Star):
         self._streaming_texts: dict[str, str] = {}
 
     async def initialize(self):
-        voice_lang = self.config.get("voice_language", "Japanese")
-        logger.info(
-            f"[text_voice_lang_split] Plugin initialized, voice_language={voice_lang}"
-        )
+        logger.info("[text_voice_lang_split] Plugin initialized")
 
     async def _translate_text(self, text: str, event: AstrMessageEvent) -> str | None:
         voice_lang = self.config.get("voice_language", "Japanese")
-        text_lang = self.config.get("text_language", "Chinese")
         custom_instructions = self.config.get("translate_instructions", "")
 
         prompt = (
-            f"Translate the following {text_lang} text into {voice_lang}. "
+            f"Translate the following text into {voice_lang}. "
             f"Only output the translated text, nothing else."
         )
         if custom_instructions:
@@ -53,9 +49,6 @@ class TextVoiceLangSplit(Star):
 
     @filter.on_decorating_result(priority=999)
     async def on_decorating_result(self, event: AstrMessageEvent):
-        if not self.config.get("enabled", True):
-            return
-
         result = event.get_result()
         if not result or not result.chain:
             return
@@ -99,14 +92,12 @@ class TextVoiceLangSplit(Star):
         result.chain.append(Record(file=audio_path, url=audio_path, text=translated))
         result.result_content_type = ResultContentType.GENERAL_RESULT
         result.use_t2i_ = False
+        self._streaming_texts.pop(self._get_session_key(event), None)
 
         logger.info("[text_voice_lang_split] Voice appended to result chain")
 
     @filter.after_message_sent(priority=999)
     async def after_message_sent(self, event: AstrMessageEvent):
-        if not self.config.get("enabled", True):
-            return
-
         session_key = self._get_session_key(event)
         accumulated = self._streaming_texts.pop(session_key, None)
         if accumulated is None:
@@ -117,10 +108,6 @@ class TextVoiceLangSplit(Star):
 
         tts_provider = self.context.get_using_tts_provider(event.unified_msg_origin)
         if not tts_provider:
-            return
-
-        result = event.get_result()
-        if result and not result.is_llm_result():
             return
 
         logger.info(
@@ -152,9 +139,6 @@ class TextVoiceLangSplit(Star):
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
-        if not self.config.get("enabled", True):
-            return
-
         text = resp.completion_text
         if not text:
             return

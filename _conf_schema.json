@@ -1,21 +1,9 @@
 {
-  "enabled": {
-    "description": "启用插件",
-    "type": "bool",
-    "default": true,
-    "hint": "关闭后Bot将以默认模式运行（文本和语音语言一致）"
-  },
   "voice_language": {
     "description": "语音目标语言",
     "type": "string",
     "default": "日语",
     "hint": "语音将以此语言合成。支持模型能处理的任意语言，如：日语、英语、韩语、法语等"
-  },
-  "text_language": {
-    "description": "文本展示语言",
-    "type": "string",
-    "default": "中文",
-    "hint": "用于构建翻译提示词中的源语言描述，无需修改Bot的原始输出语言"
   },
   "translate_instructions": {
     "description": "自定义翻译指令",
