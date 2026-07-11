@@ -100,8 +100,6 @@ class TextVoiceLangSplit(Star):
 
         translated = await self._translate_text(full_text, event)
         if not translated:
-            result.result_content_type = ResultContentType.GENERAL_RESULT
-            result.use_t2i_ = False
             self._streaming_texts.pop(self._get_session_key(event), None)
             return
 
