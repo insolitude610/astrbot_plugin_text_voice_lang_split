@@ -8,6 +8,7 @@
 - 新增 `translate_provider` 配置项，支持为翻译指定独立 LLM Provider
 - 修复翻译 Provider 未跟随聊天 `/provider` 切换的问题（现在优先读取 event selected_provider）
 - 修复翻译失败/超长/TTS 失败等提前 return 路径未阻断内置 TTS 的 bug
+- 翻译失败时回退为中文原文 TTS 兜底，不再静默
 
 ## v1.0.0
 
