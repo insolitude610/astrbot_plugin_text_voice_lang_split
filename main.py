@@ -35,10 +35,9 @@ class TextVoiceLangSplit(Star):
             prompt = f"{prompt}\nAdditional instructions: {custom_instructions}"
 
         try:
-            provider_id = (
-                event.get_extra("selected_provider")
-                or self.config.get("translate_provider", "").strip()
-            )
+            provider_id = self.config.get("translate_provider", "").strip()
+            if not provider_id:
+                provider_id = event.get_extra("selected_provider")
             if not provider_id:
                 provider_id = await self.context.get_current_chat_provider_id(
                     umo=event.unified_msg_origin
