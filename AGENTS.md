@@ -13,9 +13,40 @@ Two separate pipeline hooks handle different output modes:
 
 Critical: `on_decorating_result` does NOT fire for `STREAMING_RESULT` (ResultDecorateStage skips it). The streaming path is the fallback for platforms that buffer streaming output (e.g. QQ个人号 via aiocqhttp).
 
+## on_decorating_result exit paths
+
+Four return paths with different behaviors — this is a frequent source of bugs:
+
+| Path | Trigger | Blocks built-in TTS? | Effect |
+|------|---------|---------------------|--------|
+| Translation failed | `_translate_text` returns `None` | No | Original-language TTS fallback |
+| Exceeds `tts_max_chars` | `len(translated) > max_chars` | Yes (`use_t2i_=False`) | Silent, no voice |
+| TTS generation failed | `tts_provider.get_audio()` raises | Yes (`use_t2i_=False`) | Silent, no voice |
+| Success | Appends `Record` to chain | Yes (`use_t2i_=False`) | Translated voice sent |
+
+All paths must pop `self._streaming_texts` to prevent `after_message_sent` from double-firing. The translation-failure path intentionally does NOT set `use_t2i_=False` so AstrBot's built-in TTS reads the original text as a fallback.
+
 ## Double-TTS prevention
 
 In non-streaming mode, both `on_llm_response` AND `after_message_sent` fire. `on_decorating_result` pops `self._streaming_texts` (after appending the `Record` to the chain) to prevent `after_message_sent` from firing a second TTS. If modifying these handlers, preserve this guard.
+
+## llm_generate isolation
+
+`self.context.llm_generate()` is a bare-metal LLM call — it does NOT trigger any filter hooks (`on_llm_response`, `on_decorating_result`, `after_message_sent`, `on_llm_request`). This means:
+
+- Translation calls do NOT pollute `self._streaming_texts` or trigger other plugins
+- Other plugins' hooks do NOT fire on translation requests
+- `llm_generate` bypasses session locks, rate limiting, and the agent runner entirely
+
+## Provider resolution
+
+`_translate_text` resolves the provider in 3-tier priority:
+
+```
+1. translate_provider config     (user explicitly set in WebUI)
+2. event.selected_provider       (chat /provider command override)
+3. get_current_chat_provider_id() (default fallback)
+```
 
 ## Import paths (non-obvious)
 
@@ -31,6 +62,10 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
 `ResultContentType` is NOT exported via `astrbot.api.all` — must import from `astrbot.core.message.message_event_result`.
 
+## Config schema gotcha
+
+`_conf_schema.json` uses AstrBot's config type system. Supported types: `int`, `float`, `bool`, `string`, `text`, `list`, `file`, `object`, `template_list`. Using `"integer"` instead of `"int"` causes a `TypeError` on plugin load.
+
 ## Commands
 
 ```bash
@@ -43,14 +78,6 @@ git config http.proxy http://127.0.0.1:10808
 git config https.proxy http://127.0.0.1:10808
 git push origin main
 ```
-
-## Config
-
-Config schema lives in `_conf_schema.json`. Key behaviors:
-- `translate_provider`: if empty, `_translate_text` calls `get_current_chat_provider_id()` to reuse the active chat provider
-- `voice_language`: passed directly into the LLM translation prompt
-- `streaming_follow_up_delay`: controls `asyncio.sleep` before sending voice in streaming mode
-- `translate_timeout`: `asyncio.wait_for` timeout for the translation LLM call; set to 0 to disable
 
 ## Constraints
 
