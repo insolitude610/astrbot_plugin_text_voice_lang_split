@@ -97,6 +97,15 @@ class TextVoiceLangSplit(Star):
         if not translated:
             return
 
+        max_chars = self.config.get("tts_max_chars", 0)
+        if max_chars > 0 and len(translated) > max_chars:
+            logger.info(
+                f"[text_voice_lang_split] Translated text ({len(translated)} chars) "
+                f"exceeds max ({max_chars}), skip TTS"
+            )
+            self._streaming_texts.pop(self._get_session_key(event), None)
+            return
+
         try:
             audio_path = await tts_provider.get_audio(translated)
             event.track_temporary_local_file(audio_path)
@@ -134,6 +143,14 @@ class TextVoiceLangSplit(Star):
 
         translated = await self._translate_text(accumulated, event)
         if not translated:
+            return
+
+        max_chars = self.config.get("tts_max_chars", 0)
+        if max_chars > 0 and len(translated) > max_chars:
+            logger.info(
+                f"[text_voice_lang_split] Translated text ({len(translated)} chars) "
+                f"exceeds max ({max_chars}), skip TTS"
+            )
             return
 
         try:

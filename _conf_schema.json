@@ -29,5 +29,11 @@
     "type": "float",
     "default": 30.0,
     "hint": "翻译 LLM 请求的最大等待时间。超时后回退为不翻译，仅发送原始文本。设置为 0 表示无超时"
+  },
+  "tts_max_chars": {
+    "description": "TTS 最大字符数限制",
+    "type": "integer",
+    "default": 0,
+    "hint": "翻译后文本超过此字符数时跳过 TTS 生成，仅发送文字。设为 0 表示不限制"
   }
 }
