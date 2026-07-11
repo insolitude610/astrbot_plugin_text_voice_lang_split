@@ -4,5 +4,5 @@ desc: 让Bot展示中文文本的同时，用其他语言(如日语)合成语音
 short_desc: Bot文本和语音使用不同语言，如显示中文+朗读日语
 author: solitude
 version: v1.0.0
-repo: https://github.com/solitude/astrbot_plugin_text_voice_lang_split
+repo: https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 astrbot_version: ">=4.5.7"
