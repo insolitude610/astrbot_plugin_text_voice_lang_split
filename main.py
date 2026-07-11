@@ -95,6 +95,9 @@ class TextVoiceLangSplit(Star):
 
         translated = await self._translate_text(full_text, event)
         if not translated:
+            result.result_content_type = ResultContentType.GENERAL_RESULT
+            result.use_t2i_ = False
+            self._streaming_texts.pop(self._get_session_key(event), None)
             return
 
         max_chars = self.config.get("tts_max_chars", 0)
@@ -103,6 +106,8 @@ class TextVoiceLangSplit(Star):
                 f"[text_voice_lang_split] Translated text ({len(translated)} chars) "
                 f"exceeds max ({max_chars}), skip TTS"
             )
+            result.result_content_type = ResultContentType.GENERAL_RESULT
+            result.use_t2i_ = False
             self._streaming_texts.pop(self._get_session_key(event), None)
             return
 
@@ -114,6 +119,9 @@ class TextVoiceLangSplit(Star):
                 "[text_voice_lang_split] TTS generation failed, keeping original",
                 exc_info=True,
             )
+            result.result_content_type = ResultContentType.GENERAL_RESULT
+            result.use_t2i_ = False
+            self._streaming_texts.pop(self._get_session_key(event), None)
             return
 
         result.chain.append(Record(file=audio_path, url=audio_path, text=translated))
