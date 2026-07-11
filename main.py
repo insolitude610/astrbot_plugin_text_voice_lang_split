@@ -24,7 +24,12 @@ class TextVoiceLangSplit(Star):
 
         prompt = (
             f"Translate the following text into {voice_lang}. "
-            f"Only output the translated text, nothing else."
+            f"At the beginning of each sentence, insert a suitable emotion tag "
+            f"in {voice_lang} wrapped in square brackets "
+            f"(e.g. [嬉しい], [悲しい] in Japanese, [happy], [sad] in English). "
+            f"Choose tags based on the emotional tone of the original text. "
+            f"If a sentence has no clear emotion, omit the tag. "
+            f"Only output the translated text with tags, nothing else."
         )
         if custom_instructions:
             prompt = f"{prompt}\nAdditional instructions: {custom_instructions}"

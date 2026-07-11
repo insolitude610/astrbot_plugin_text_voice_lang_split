@@ -2,6 +2,7 @@
 
 ## v1.1.0
 
+- 翻译时自动插入情绪标签（`[嬉しい]`、`[悲しい]` 等），配合 FishAudio 等 TTS 实现情感语音
 - 新增 `translate_timeout` 配置项，翻译 LLM 请求超时自动回退，避免阻塞管线
 - 新增 `translate_provider` 配置项，支持为翻译指定独立 LLM Provider
 

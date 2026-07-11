@@ -5,11 +5,12 @@
 ## 特性
 
 - 文本与语音使用不同语言，如显示中文 + 朗读日语
+- 翻译时自动插入情绪标签（`[嬉しい]`、`[悲しい]` 等），配合 FishAudio 等 TTS 实现情感语音
 - 支持任意 TTS 提供商（Edge TTS、OpenAI TTS、Azure TTS、FishAudio 等）
 - 兼容流式和非流式输出
 - 跨平台通用（Windows / macOS / Linux）
 - WebUI 可视化配置
-- 翻译/TTS 失败自动回退，不中断正常对话
+- 翻译/TTS 失败自动回退，翻译超时保护，不中断正常对话
 
 ## 安装
 
@@ -33,7 +34,9 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `voice_language` | `日语` | 语音目标语言，支持模型能处理的任意语言 |
-| `translate_instructions` | (空) | 自定义翻译指令，如"使用可爱的语气翻译" |
+| `translate_instructions` | (空) | 自定义翻译指令，如"使用可爱的语气翻译"。填写后会追加到默认 prompt 后 |
+| `translate_provider` | (空) | 翻译用 LLM Provider，留空则复用当前聊天的 Provider |
+| `translate_timeout` | `30` | 翻译请求超时(秒)，设为 0 关闭超时 |
 | `streaming_follow_up_delay` | `1.5` | 流式模式下语音跟进的延迟(秒) |
 
 ## 要求
@@ -44,7 +47,7 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 
 ## 原理
 
-**非流式模式：** 在消息装饰阶段（`on_decorating_result`）拦截 LLM 的文本结果 → 调用 LLM 翻译 → 调用 TTS Provider 生成语音 → 重组消息链为 `[原文文本] + [目标语言语音]`，阻止内置 TTS 重复触发。
+**非流式模式：** 在消息装饰阶段（`on_decorating_result`）拦截 LLM 的文本结果 → 调用 LLM 翻译（同时自动插入情绪标签如 `[嬉しい]`，支持 FishAudio 等 TTS 的情感语音）→ 调用 TTS Provider 生成语音 → 重组消息链为 `[原文文本] + [目标语言语音]`，阻止内置 TTS 重复触发。
 
 **流式模式：** 捕获 LLM 完整响应文本（`on_llm_response`）→ 文本正常流式发送 → 发送完成后翻译 + TTS 生成语音跟进（`after_message_sent`）。
 
