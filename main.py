@@ -35,11 +35,21 @@ class TextVoiceLangSplit(Star):
                 provider_id = await self.context.get_current_chat_provider_id(
                     umo=event.unified_msg_origin
                 )
-            llm_resp = await self.context.llm_generate(
+            coro = self.context.llm_generate(
                 chat_provider_id=provider_id,
                 prompt=f"{prompt}\n\nText: {text}",
             )
+            timeout = self.config.get("translate_timeout", 30.0)
+            if timeout > 0:
+                llm_resp = await asyncio.wait_for(coro, timeout=timeout)
+            else:
+                llm_resp = await coro
             return llm_resp.completion_text.strip()
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[text_voice_lang_split] Translation timed out after {timeout}s, falling back"
+            )
+            return None
         except Exception:
             logger.warning(
                 "[text_voice_lang_split] Translation failed, falling back",

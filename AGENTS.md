@@ -15,7 +15,7 @@ Critical: `on_decorating_result` does NOT fire for `STREAMING_RESULT` (ResultDec
 
 ## Double-TTS prevention
 
-In non-streaming mode, both `on_llm_response` AND `after_message_sent` fire. `on_decorating_result` pops `self._streaming_texts` at line 95 to prevent `after_message_sent` from firing a second TTS. If modifying these handlers, preserve this guard.
+In non-streaming mode, both `on_llm_response` AND `after_message_sent` fire. `on_decorating_result` pops `self._streaming_texts` (after appending the `Record` to the chain) to prevent `after_message_sent` from firing a second TTS. If modifying these handlers, preserve this guard.
 
 ## Import paths (non-obvious)
 
@@ -43,6 +43,14 @@ git config http.proxy http://127.0.0.1:10808
 git config https.proxy http://127.0.0.1:10808
 git push origin main
 ```
+
+## Config
+
+Config schema lives in `_conf_schema.json`. Key behaviors:
+- `translate_provider`: if empty, `_translate_text` calls `get_current_chat_provider_id()` to reuse the active chat provider
+- `voice_language`: passed directly into the LLM translation prompt
+- `streaming_follow_up_delay`: controls `asyncio.sleep` before sending voice in streaming mode
+- `translate_timeout`: `asyncio.wait_for` timeout for the translation LLM call; set to 0 to disable
 
 ## Constraints
 

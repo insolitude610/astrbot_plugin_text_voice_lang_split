@@ -23,5 +23,11 @@
     "_special": "select_provider",
     "hint": "选择翻译文本用的 LLM 提供商。留空则复用当前聊天的提供商",
     "default": ""
+  },
+  "translate_timeout": {
+    "description": "翻译请求超时时间(秒)",
+    "type": "float",
+    "default": 30.0,
+    "hint": "翻译 LLM 请求的最大等待时间。超时后回退为不翻译，仅发送原始文本。设置为 0 表示无超时"
   }
 }
