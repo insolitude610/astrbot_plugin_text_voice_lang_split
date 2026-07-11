@@ -16,5 +16,12 @@
     "type": "float",
     "default": 1.5,
     "hint": "流式输出时，文本发送完成后等待此秒数再发送语音。避免文本流和语音同时抵达造成困扰"
+  },
+  "translate_provider": {
+    "description": "翻译用途的 LLM Provider",
+    "type": "string",
+    "_special": "select_provider",
+    "hint": "选择翻译文本用的 LLM 提供商。留空则复用当前聊天的提供商",
+    "default": ""
   }
 }
