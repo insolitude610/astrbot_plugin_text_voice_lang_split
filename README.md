@@ -33,6 +33,8 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 
 ## 配置
 
+> **重要：** 如果翻译频繁超时，请在 AstrBot WebUI → Provider 设置中，找到你给翻译专用的那个 Provider，将 **`timeout`** 从默认的 `120` 改为 **`15`**。插件本身的超时重试只能缓解问题，根因在于 `asyncio.wait_for` 强制取消 HTTP 请求后 httpx 连接池会残留脏连接。让 httpx 用自己的超时机制断开连接才能彻底避免脏连接产生。**改一个数字即可，零副作用。**
+
 在 WebUI 插件配置页面中设置：
 
 | 配置项 | 默认值 | 说明 |
