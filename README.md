@@ -63,7 +63,7 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 
 # 作者的话
 
-本来我是想先找找看有没有现成的轮子来符合我的需求，所以就先让gemini老师帮我去搜搜找找，我的需求就是很简单的：bot接了我自己搞好的fish audio提供商，但是模型说的是日语，强行说中文很怪，所以我需要一个让bot既能发中文又能说日语的TTS插件。同时最好可以配置超过某个字符数量之后bot就不发语音了，不然太长太卡了。于是gemini老师给我找到了一个科尔的tts_sanitizer（https://github.com/Luna-channel/astrbot_plugin_tts_sanitizer）还有基于这个插件的fork翻译版（https://github.com/chenluQwQ/astrbot_plugin_tts_sanitizer_bilingual）。这两个一个是专门TTS过滤的，还有一个加上了我要的双语翻译。我都下载了两位的插件使用，受益匪浅！非常感谢两位大佬！虽然我用下来还行但我还是希望可以更简单一点，所以这才搞了一个比较轻量化的更能直接满足我需求的插件。
+本来我是想先找找看有没有现成的轮子来符合我的需求，所以就先让gemini老师帮我去搜搜找找，我的需求就是很简单的：bot接了我自己搞好的fish audio提供商，但是模型说的是日语，强行说中文很怪，所以我需要一个让bot既能发中文又能说日语的TTS插件。同时最好可以配置超过某个字符数量之后bot就不发语音了，不然太长太卡了。于是gemini老师给我找到了一个科尔的tts_sanitizer（ https://github.com/Luna-channel/astrbot_plugin_tts_sanitizer ）还有基于这个插件的fork翻译版（ https://github.com/chenluQwQ/astrbot_plugin_tts_sanitizer_bilingual ）。这两个一个是专门TTS过滤的，还有一个加上了我要的双语翻译。我都下载了两位的插件使用，受益匪浅！非常感谢两位大佬！虽然我用下来还行但我还是希望可以更简单一点，所以这才搞了一个比较轻量化的更能直接满足我需求的插件。
 
 
 ## 许可证
