@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.2.1
+
+- 修复 Agent Live 模式下插件 TTS 与内置分句 TTS 同时触发导致 429 的问题（自动检测并跳过）
+- 修复 `tts_max_chars` 在文本过滤**前**检查长度的问题：含大量代码块/Markdown 的回复被错误跳过，现改为过滤后检查
+- 修复 Markdown 链接 `[text](http://...)` 过滤顺序 bug：URL 先被步骤 3 移除导致步骤 4 无法展开链接，残留 `[text]()` 送入翻译
+- 新增 `get_audio()` 返回空路径检查，避免创建无效 Record 导致下游报错
+- 更新 README 添加 WebChat Live Chat 兼容性说明
+
 ## v1.2.0
 
 - `tts_max_chars` 改为检查**原文**长度而非译文长度，避免翻译后才截断造成的 LLM 浪费

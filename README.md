@@ -41,13 +41,13 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 | `translate_instructions` | (空) | 自定义翻译指令，如"使用可爱的语气翻译"。填写后会追加到默认 prompt 后 |
 | `translate_provider` | (空) | 翻译用 LLM Provider，留空则复用当前聊天的 Provider |
 | `translate_timeout` | `30` | 翻译请求超时(秒)，设为 0 关闭超时 |
-| `tts_max_chars` | `0` | 原文超过此字符数时跳过翻译和 TTS。设为 0 不限制 |
+| `tts_max_chars` | `0` | 过滤后的文本超过此字符数时跳过翻译和 TTS。设为 0 不限制 |
 | `remove_patterns` | (见默认值) | TTS 文本过滤正则规则。匹配到的内容在翻译前删除，用于过滤颜文字、装饰符号等视觉噪声 |
 | `streaming_follow_up_delay` | `1.5` | 流式模式下语音跟进的延迟(秒) |
 
 **Provider 优先级：** `translate_provider`（手动指定）> 聊天 `/provider` 切换 > 默认 Provider。
 
-**失败回退：** 翻译超时或报错 → 静默不发语音；原文超 `tts_max_chars` → 静默不发语音；过滤后无内容 → 静默不发语音。
+**失败回退：** 翻译超时或报错 → 静默不发语音；过滤后文本超 `tts_max_chars` → 静默不发语音；过滤后无内容 → 静默不发语音。
 
 ## 要求
 

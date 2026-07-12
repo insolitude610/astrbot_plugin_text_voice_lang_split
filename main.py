@@ -89,8 +89,8 @@ class TextVoiceLangSplit(Star):
             return ""
         text = re.sub(r"```[\s\S]*?```", "", text)
         text = re.sub(r"`[^`]+`", "", text)
+        text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
         text = re.sub(r"https?://\S+", "", text)
-        text = re.sub(r"\[([^\]]*)\]\([^)]+\)", r"\1", text)
         text = re.sub(r"[*_~]{1,3}", "", text)
         for pattern in self._filter_patterns:
             text = pattern.sub("", text)
@@ -122,21 +122,21 @@ class TextVoiceLangSplit(Star):
         if len(full_text.strip()) < 2:
             return
 
-        max_chars = self.config.get("tts_max_chars", 0)
-        if max_chars > 0 and len(full_text) > max_chars:
+        filtered_text = self._filter_text_for_tts(full_text)
+        if len(filtered_text.strip()) < 2:
             logger.info(
-                f"[text_voice_lang_split] Original text ({len(full_text)} chars) "
-                f"exceeds max ({max_chars}), skip TTS"
+                "[text_voice_lang_split] Nothing speakable after filtering, skip TTS"
             )
             result.result_content_type = ResultContentType.GENERAL_RESULT
             result.use_t2i_ = False
             self._streaming_texts.pop(self._get_session_key(event), None)
             return
 
-        filtered_text = self._filter_text_for_tts(full_text)
-        if len(filtered_text.strip()) < 2:
+        max_chars = self.config.get("tts_max_chars", 0)
+        if max_chars > 0 and len(filtered_text) > max_chars:
             logger.info(
-                "[text_voice_lang_split] Nothing speakable after filtering, skip TTS"
+                f"[text_voice_lang_split] Filtered text ({len(filtered_text)} chars) "
+                f"exceeds max ({max_chars}), skip TTS"
             )
             result.result_content_type = ResultContentType.GENERAL_RESULT
             result.use_t2i_ = False
@@ -155,6 +155,14 @@ class TextVoiceLangSplit(Star):
 
         try:
             audio_path = await tts_provider.get_audio(translated)
+            if not audio_path:
+                logger.error(
+                    "[text_voice_lang_split] TTS returned empty path, skipping"
+                )
+                result.result_content_type = ResultContentType.GENERAL_RESULT
+                result.use_t2i_ = False
+                self._streaming_texts.pop(self._get_session_key(event), None)
+                return
             event.track_temporary_local_file(audio_path)
         except Exception:
             logger.error(
@@ -196,18 +204,18 @@ class TextVoiceLangSplit(Star):
         if not tts_provider:
             return
 
-        max_chars = self.config.get("tts_max_chars", 0)
-        if max_chars > 0 and len(accumulated) > max_chars:
-            logger.info(
-                f"[text_voice_lang_split] Original text ({len(accumulated)} chars) "
-                f"exceeds max ({max_chars}), skip TTS"
-            )
-            return
-
         filtered_text = self._filter_text_for_tts(accumulated)
         if len(filtered_text.strip()) < 2:
             logger.info(
                 "[text_voice_lang_split] Nothing speakable after filtering, skip streaming TTS"
+            )
+            return
+
+        max_chars = self.config.get("tts_max_chars", 0)
+        if max_chars > 0 and len(filtered_text) > max_chars:
+            logger.info(
+                f"[text_voice_lang_split] Filtered text ({len(filtered_text)} chars) "
+                f"exceeds max ({max_chars}), skip TTS"
             )
             return
 
@@ -224,6 +232,11 @@ class TextVoiceLangSplit(Star):
 
         try:
             audio_path = await tts_provider.get_audio(translated)
+            if not audio_path:
+                logger.error(
+                    "[text_voice_lang_split] Streaming TTS returned empty path, skipping"
+                )
+                return
             event.track_temporary_local_file(audio_path)
         except Exception:
             logger.error(
