@@ -122,6 +122,33 @@ The `tts_max_chars` limit is checked on `filtered_text` (AFTER `_filter_text_for
 - Translation calls do NOT pollute `self._streaming_texts` or trigger other plugins
 - Other plugins' hooks do NOT fire on translation requests
 - `llm_generate` bypasses session locks, rate limiting, and the agent runner entirely
+- Each retry creates a fresh coroutine (`self.context.llm_generate(...)` called inside the loop), so a cancelled attempt does not leak state into the next one
+
+## Translation timeout and retry
+
+`_translate_text` wraps `llm_generate` with `asyncio.wait_for` and retries ONCE on timeout:
+
+```
+attempt 1: await asyncio.wait_for(llm_generate(...), timeout)
+  ↓ TimeoutError
+await asyncio.sleep(0.5)  ← give httpx connection pool time to purge stale connections
+  ↓
+attempt 2: await asyncio.wait_for(llm_generate(...), timeout)
+  ↓ TimeoutError again → give up, return None
+  ↓ Success → return completion_text
+```
+
+The 0.5s delay addresses an httpx connection pool issue: when `asyncio.wait_for` forcibly cancels a coroutine mid-HTTP-request, the underlying TCP connection may NOT be properly closed by httpx. The stale connection stays in the pool and gets re-used by the retry, causing another hang. `asyncio.sleep(0.5)` lets the event loop process the `CancelledError` cleanup and purge the bad connection before retrying.
+
+### Root cause fix (not in plugin)
+
+The real fix is **provider-level**: set `timeout: 15` on the translation provider's config in AstrBot WebUI (default is 120). This makes httpx handle timeouts internally via `httpx.ReadTimeout` — which it CAN clean up properly — instead of `asyncio.wait_for` forcibly cancelling from outside.
+
+With the provider timeout set low:
+- httpx raises `ReadTimeout` → closes the TCP connection cleanly → no dirty connection in pool → retry always starts fresh
+- Total worst-case latency: ~15s (provider timeout) + 0.5s + ~15s ≈ 31s, vs ~60s+ without the fix
+
+The plugin's retry is the **safety net**; the provider timeout is the **real fix**.
 
 ## Provider resolution
 
@@ -133,7 +160,7 @@ The `tts_max_chars` limit is checked on `filtered_text` (AFTER `_filter_text_for
 3. get_current_chat_provider_id() (default fallback)
 ```
 
-Recommend setting `translate_provider` to a different provider than the main chat provider to avoid race conditions on rate-limited APIs.
+Recommend setting `translate_provider` to a different provider than the main chat provider to avoid race conditions on rate-limited APIs. Also set that provider's `timeout` to **15** (not the default 120) per the timeout section above.
 
 ## Import paths (non-obvious)
 
@@ -160,9 +187,9 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 ruff format data/plugins/astrbot_plugin_text_voice_lang_split/
 ruff check data/plugins/astrbot_plugin_text_voice_lang_split/
 
-# Push (proxy required for GitHub)
-git config http.proxy http://127.0.0.1:10808
-git config https.proxy http://127.0.0.1:10808
+# Push (if behind proxy, set first)
+# git config http.proxy http://127.0.0.1:10808
+# git config https.proxy http://127.0.0.1:10808
 git push origin main
 ```
 
