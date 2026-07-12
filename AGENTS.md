@@ -19,7 +19,7 @@ Four return paths with different behaviors — this is a frequent source of bugs
 
 | Path | Trigger | Blocks built-in TTS? | Effect |
 |------|---------|---------------------|--------|
-| Translation failed | `_translate_text` returns `None` | Yes (`use_t2i_=False`) | Original-language TTS via explicit call to `tts_provider.get_audio(full_text)` — does NOT rely on AstrBot's built-in TTS pipeline |
+| Translation failed | `_translate_text` returns `None` | Yes (`use_t2i_=False`) | Silent, text only — no voice sent |
 | Exceeds `tts_max_chars` | `len(full_text) > max_chars` (checked before translation) | Yes (`use_t2i_=False`) | Silent, no voice — translation is skipped entirely |
 | TTS generation failed | `tts_provider.get_audio()` raises | Yes (`use_t2i_=False`) | Silent, no voice |
 | Success | Appends `Record` to chain | Yes (`use_t2i_=False`) | Translated voice sent |

@@ -148,22 +148,9 @@ class TextVoiceLangSplit(Star):
         translated = await self._translate_text(filtered_text, event)
         if not translated:
             self._streaming_texts.pop(self._get_session_key(event), None)
-            try:
-                audio_path = await tts_provider.get_audio(full_text)
-                event.track_temporary_local_file(audio_path)
-                result.chain.append(
-                    Record(file=audio_path, url=audio_path, text=full_text)
-                )
-                result.result_content_type = ResultContentType.GENERAL_RESULT
-                result.use_t2i_ = False
-                logger.info(
-                    "[text_voice_lang_split] Translation failed, fallback TTS with original text"
-                )
-            except Exception:
-                logger.error(
-                    "[text_voice_lang_split] Translation failed and fallback TTS also failed",
-                    exc_info=True,
-                )
+            result.result_content_type = ResultContentType.GENERAL_RESULT
+            result.use_t2i_ = False
+            logger.info("[text_voice_lang_split] Translation failed, text only")
             return
 
         try:
@@ -222,23 +209,8 @@ class TextVoiceLangSplit(Star):
         translated = await self._translate_text(filtered_text, event)
         if not translated:
             logger.info(
-                "[text_voice_lang_split] Streaming translation failed, fallback TTS with original text"
+                "[text_voice_lang_split] Streaming translation failed, text only"
             )
-            try:
-                audio_path = await tts_provider.get_audio(accumulated)
-                event.track_temporary_local_file(audio_path)
-                delay = self.config.get("streaming_follow_up_delay", 1.5)
-                await asyncio.sleep(delay)
-                chain = MessageChain()
-                chain.chain = [
-                    Record(file=audio_path, url=audio_path, text=accumulated)
-                ]
-                await self.context.send_message(event.unified_msg_origin, chain)
-            except Exception:
-                logger.error(
-                    "[text_voice_lang_split] Streaming fallback TTS also failed",
-                    exc_info=True,
-                )
             return
 
         try:
