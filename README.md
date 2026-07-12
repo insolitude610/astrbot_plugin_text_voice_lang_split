@@ -40,7 +40,7 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 | `voice_language` | `日语` | 语音目标语言，支持模型能处理的任意语言 |
 | `translate_instructions` | (空) | 自定义翻译指令，如"使用可爱的语气翻译"。填写后会追加到默认 prompt 后 |
 | `translate_provider` | (空) | 翻译用 LLM Provider，留空则复用当前聊天的 Provider |
-| `translate_timeout` | `30` | 翻译请求超时(秒)，设为 0 关闭超时 |
+| `translate_timeout` | `30` | 翻译请求超时(秒)，超时后自动重试一次（间隔 0.5s），设为 0 关闭超时 |
 | `tts_max_chars` | `0` | 过滤后的文本超过此字符数时跳过翻译和 TTS。设为 0 不限制 |
 | `remove_patterns` | (见默认值) | TTS 文本过滤正则规则。匹配到的内容在翻译前删除，用于过滤颜文字、装饰符号等视觉噪声 |
 | `streaming_follow_up_delay` | `1.5` | 流式模式下语音跟进的延迟(秒) |
@@ -48,6 +48,14 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 **Provider 优先级：** `translate_provider`（手动指定）> 聊天 `/provider` 切换 > 默认 Provider。
 
 **失败回退：** 翻译超时或报错 → 静默不发语音；过滤后文本超 `tts_max_chars` → 静默不发语音；过滤后无内容 → 静默不发语音。
+
+### 减少翻译超时
+
+翻译请求超时可能由网络波动或 Provider API 响应慢导致。推荐以下措施：
+
+1. **为翻译单独创建一个 Provider**（如便宜的轻量模型），并在其 AstrBot 配置中将 `timeout` 设为 **15**（而非默认 120）。这样 httpx 会用自己的超时机制优雅关闭连接，比 `asyncio.wait_for` 强制取消更干净。
+2. 插件默认超时 30s，超时后会自动延迟 0.5s 重试一次。如果两次都失败则回退为纯文本发送。
+3. 如果网络环境确实不稳定，可以适当调高 `translate_timeout`（如 60s），但建议优先处理 Provider 侧的超时配置。
 
 ## 要求
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.2.2
+
+- 修复翻译 LLM 频繁超时问题：超时后增加 0.5s 延迟重试一次，给 httpx 连接池时间清理被 `asyncio.wait_for` 强制取消后残留的半死连接，避免后续请求复用脏连接导致的连锁超时
+- `translate_timeout` 默认值保持 30s，推荐翻译专用 provider 配置 `timeout: 15` 以利用 httpx 原生超时取代 asyncio 层取消
+
 ## v1.2.1
 
 - 修复 Agent Live 模式下插件 TTS 与内置分句 TTS 同时触发导致 429 的问题（自动检测并跳过）

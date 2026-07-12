@@ -37,38 +37,51 @@ class TextVoiceLangSplit(Star):
         if custom_instructions:
             prompt = f"{prompt}\nAdditional instructions: {custom_instructions}"
 
-        try:
-            provider_id = self.config.get("translate_provider", "").strip()
-            if not provider_id:
-                provider_id = event.get_extra("selected_provider")
-            if not provider_id:
-                provider_id = await self.context.get_current_chat_provider_id(
-                    umo=event.unified_msg_origin
+        provider_id = self.config.get("translate_provider", "").strip()
+        if not provider_id:
+            provider_id = event.get_extra("selected_provider")
+        if not provider_id:
+            provider_id = await self.context.get_current_chat_provider_id(
+                umo=event.unified_msg_origin
+            )
+
+        timeout = self.config.get("translate_timeout", 30.0)
+        prompt_full = f"{prompt}\n\nText: {text}"
+
+        for attempt in range(2):
+            try:
+                logger.debug(
+                    f"[text_voice_lang_split] Translating with provider: {provider_id}"
+                    + (f" (retry {attempt + 1}/2)" if attempt > 0 else "")
                 )
-            logger.debug(
-                f"[text_voice_lang_split] Translating with provider: {provider_id}"
-            )
-            coro = self.context.llm_generate(
-                chat_provider_id=provider_id,
-                prompt=f"{prompt}\n\nText: {text}",
-            )
-            timeout = self.config.get("translate_timeout", 30.0)
-            if timeout > 0:
-                llm_resp = await asyncio.wait_for(coro, timeout=timeout)
-            else:
-                llm_resp = await coro
-            return llm_resp.completion_text.strip()
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"[text_voice_lang_split] Translation timed out after {timeout}s, falling back"
-            )
-            return None
-        except Exception:
-            logger.warning(
-                "[text_voice_lang_split] Translation failed, falling back",
-                exc_info=True,
-            )
-            return None
+                coro = self.context.llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=prompt_full,
+                )
+                if timeout > 0:
+                    llm_resp = await asyncio.wait_for(coro, timeout=timeout)
+                else:
+                    llm_resp = await coro
+                return llm_resp.completion_text.strip()
+            except asyncio.TimeoutError:
+                if attempt < 1:
+                    logger.info(
+                        f"[text_voice_lang_split] Translation timed out after {timeout}s, "
+                        f"retrying after short delay to refresh connection..."
+                    )
+                    await asyncio.sleep(0.5)
+                    continue
+                logger.warning(
+                    f"[text_voice_lang_split] Translation timed out after {timeout}s "
+                    f"(retries exhausted), falling back"
+                )
+                return None
+            except Exception:
+                logger.warning(
+                    "[text_voice_lang_split] Translation failed, falling back",
+                    exc_info=True,
+                )
+                return None
 
     def _get_session_key(self, event: AstrMessageEvent) -> str:
         return event.unified_msg_origin
