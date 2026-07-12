@@ -1,4 +1,5 @@
 import asyncio
+import re
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import MessageChain, filter
@@ -14,6 +15,8 @@ class TextVoiceLangSplit(Star):
         super().__init__(context)
         self.config = config
         self._streaming_texts: dict[str, str] = {}
+        self._filter_patterns: list = []
+        self._compile_filter_patterns()
 
     async def initialize(self):
         logger.info("[text_voice_lang_split] Plugin initialized")
@@ -70,6 +73,29 @@ class TextVoiceLangSplit(Star):
     def _get_session_key(self, event: AstrMessageEvent) -> str:
         return event.unified_msg_origin
 
+    def _compile_filter_patterns(self):
+        patterns = self.config.get("remove_patterns", [])
+        self._filter_patterns = []
+        for p in patterns:
+            try:
+                self._filter_patterns.append(re.compile(p))
+            except re.error:
+                logger.warning(
+                    f"[text_voice_lang_split] Invalid regex pattern: {p}"
+                )
+
+    def _filter_text_for_tts(self, text: str) -> str:
+        if not text:
+            return ""
+        text = re.sub(r"```[\s\S]*?```", "", text)
+        text = re.sub(r"`[^`]+`", "", text)
+        text = re.sub(r"https?://\S+", "", text)
+        text = re.sub(r"\[([^\]]*)\]\([^)]+\)", r"\1", text)
+        text = re.sub(r"[*_~]{1,3}", "", text)
+        for pattern in self._filter_patterns:
+            text = pattern.sub("", text)
+        return text
+
     @filter.on_decorating_result(priority=999)
     async def on_decorating_result(self, event: AstrMessageEvent):
         result = event.get_result()
@@ -107,9 +133,19 @@ class TextVoiceLangSplit(Star):
             self._streaming_texts.pop(self._get_session_key(event), None)
             return
 
+        filtered_text = self._filter_text_for_tts(full_text)
+        if len(filtered_text.strip()) < 2:
+            logger.info(
+                "[text_voice_lang_split] Nothing speakable after filtering, skip TTS"
+            )
+            result.result_content_type = ResultContentType.GENERAL_RESULT
+            result.use_t2i_ = False
+            self._streaming_texts.pop(self._get_session_key(event), None)
+            return
+
         logger.info(f"[text_voice_lang_split] Translating: '{full_text[:50]}...'")
 
-        translated = await self._translate_text(full_text, event)
+        translated = await self._translate_text(filtered_text, event)
         if not translated:
             self._streaming_texts.pop(self._get_session_key(event), None)
             try:
@@ -172,11 +208,18 @@ class TextVoiceLangSplit(Star):
             )
             return
 
+        filtered_text = self._filter_text_for_tts(accumulated)
+        if len(filtered_text.strip()) < 2:
+            logger.info(
+                "[text_voice_lang_split] Nothing speakable after filtering, skip streaming TTS"
+            )
+            return
+
         logger.info(
             f"[text_voice_lang_split] Streaming: translating '{accumulated[:50]}...'"
         )
 
-        translated = await self._translate_text(accumulated, event)
+        translated = await self._translate_text(filtered_text, event)
         if not translated:
             logger.info(
                 "[text_voice_lang_split] Streaming translation failed, fallback TTS with original text"
