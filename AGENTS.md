@@ -19,12 +19,12 @@ Four return paths with different behaviors — this is a frequent source of bugs
 
 | Path | Trigger | Blocks built-in TTS? | Effect |
 |------|---------|---------------------|--------|
-| Translation failed | `_translate_text` returns `None` | No | Original-language TTS fallback |
+| Translation failed | `_translate_text` returns `None` | Yes (`use_t2i_=False`) | Original-language TTS via explicit call to `tts_provider.get_audio(full_text)` — does NOT rely on AstrBot's built-in TTS pipeline |
 | Exceeds `tts_max_chars` | `len(translated) > max_chars` | Yes (`use_t2i_=False`) | Silent, no voice |
 | TTS generation failed | `tts_provider.get_audio()` raises | Yes (`use_t2i_=False`) | Silent, no voice |
 | Success | Appends `Record` to chain | Yes (`use_t2i_=False`) | Translated voice sent |
 
-All paths must pop `self._streaming_texts` to prevent `after_message_sent` from double-firing. The translation-failure path intentionally does NOT set `use_t2i_=False` so AstrBot's built-in TTS reads the original text as a fallback.
+All paths must pop `self._streaming_texts` to prevent `after_message_sent` from double-firing. The translation-failure path explicitly calls TTS on the original text and appends the `Record` + sets `use_t2i_=False` — it no longer relies on AstrBot's built-in TTS, which was unreliable across platforms.
 
 ## Double-TTS prevention
 
