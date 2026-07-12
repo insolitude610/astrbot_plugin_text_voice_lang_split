@@ -8,27 +8,42 @@ Two separate pipeline hooks handle different output modes:
 
 | Mode | Hook | Flow |
 |------|------|------|
-| Non-streaming (`LLM_RESULT`) | `@filter.on_decorating_result(priority=999)` | Translate text → call TTS provider → append `Record` to chain → set `ResultContentType.GENERAL_RESULT` + `use_t2i_=False` |
-| Streaming (`STREAMING_RESULT`) | `@filter.on_llm_response` → `@filter.after_message_sent` | Capture `LLMResponse.completion_text` → after message sent, translate + TTS + send voice as follow-up |
+| Non-streaming (`LLM_RESULT`) | `@filter.on_decorating_result(priority=999)` | Filter non-speakable content → Translate filtered text → call TTS provider → append `Record` to chain → set `ResultContentType.GENERAL_RESULT` + `use_t2i_=False` |
+| Streaming (`STREAMING_RESULT`) | `@filter.on_llm_response` → `@filter.after_message_sent` | Capture `LLMResponse.completion_text` → after message sent, filter + translate + TTS + send voice as follow-up |
 
 Critical: `on_decorating_result` does NOT fire for `STREAMING_RESULT` (ResultDecorateStage skips it). The streaming path is the fallback for platforms that buffer streaming output (e.g. QQ个人号 via aiocqhttp).
 
 ## on_decorating_result exit paths
 
-Four return paths with different behaviors — this is a frequent source of bugs:
+Five return paths with different behaviors — this is a frequent source of bugs:
 
 | Path | Trigger | Blocks built-in TTS? | Effect |
 |------|---------|---------------------|--------|
 | Translation failed | `_translate_text` returns `None` | Yes (`use_t2i_=False`) | Silent, text only — no voice sent |
-| Exceeds `tts_max_chars` | `len(full_text) > max_chars` (checked before translation) | Yes (`use_t2i_=False`) | Silent, no voice — translation is skipped entirely |
+| Exceeds `tts_max_chars` | `len(full_text) > max_chars` (checked before translation) | Yes (`use_t2i_=False`) | Silent, no voice — translation and TTS are skipped entirely |
+| Nothing speakable after filtering | `_filter_text_for_tts()` returns < 2 chars | Yes (`use_t2i_=False`) | Silent, text only — all content was visual noise |
 | TTS generation failed | `tts_provider.get_audio()` raises | Yes (`use_t2i_=False`) | Silent, no voice |
 | Success | Appends `Record` to chain | Yes (`use_t2i_=False`) | Translated voice sent |
 
-All paths must pop `self._streaming_texts` to prevent `after_message_sent` from double-firing. The translation-failure path explicitly calls TTS on the original text and appends the `Record` + sets `use_t2i_=False` — it no longer relies on AstrBot's built-in TTS, which was unreliable across platforms.
+All paths must pop `self._streaming_texts` to prevent `after_message_sent` from double-firing.
 
 ## Double-TTS prevention
 
-In non-streaming mode, both `on_llm_response` AND `after_message_sent` fire. `on_decorating_result` pops `self._streaming_texts` (after appending the `Record` to the chain) to prevent `after_message_sent` from firing a second TTS. If modifying these handlers, preserve this guard.
+In non-streaming mode, both `on_llm_response` AND `after_message_sent` fire. `on_decorating_result` pops `self._streaming_texts` to prevent `after_message_sent` from firing a second TTS. If modifying these handlers, preserve this guard.
+
+## Text filtering before translation
+
+`_filter_text_for_tts()` runs locally (zero LLM cost) before translation in both hooks. It strips visual noise in 5 steps:
+
+1. Code blocks (` ```...``` `, `` `...` ``)
+2. URLs
+3. Markdown links → keep display text
+4. Markdown formatting symbols (`**`, `*`, `_`, `~~`)
+5. User-configured regex patterns from `remove_patterns` config
+
+Patterns are compiled at `__init__` via `_compile_filter_patterns()`. Invalid regex is logged as a warning, not raised.
+
+Filtered text is what the LLM sees during translation. The **unfiltered original** text is what the user sees (displayed message chain is never touched).
 
 ## llm_generate isolation
 
