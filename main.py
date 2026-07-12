@@ -176,6 +176,15 @@ class TextVoiceLangSplit(Star):
     @filter.after_message_sent(priority=999)
     async def after_message_sent(self, event: AstrMessageEvent):
         session_key = self._get_session_key(event)
+
+        if event.get_extra("action_type") == "live":
+            logger.info(
+                "[text_voice_lang_split] Agent live mode detected, "
+                "skipping plugin TTS to avoid conflict with built-in agent TTS"
+            )
+            self._streaming_texts.pop(session_key, None)
+            return
+
         accumulated = self._streaming_texts.pop(session_key, None)
         if accumulated is None:
             return
