@@ -96,6 +96,17 @@ class TextVoiceLangSplit(Star):
         if len(full_text.strip()) < 2:
             return
 
+        max_chars = self.config.get("tts_max_chars", 0)
+        if max_chars > 0 and len(full_text) > max_chars:
+            logger.info(
+                f"[text_voice_lang_split] Original text ({len(full_text)} chars) "
+                f"exceeds max ({max_chars}), skip TTS"
+            )
+            result.result_content_type = ResultContentType.GENERAL_RESULT
+            result.use_t2i_ = False
+            self._streaming_texts.pop(self._get_session_key(event), None)
+            return
+
         logger.info(f"[text_voice_lang_split] Translating: '{full_text[:50]}...'")
 
         translated = await self._translate_text(full_text, event)
@@ -117,17 +128,6 @@ class TextVoiceLangSplit(Star):
                     "[text_voice_lang_split] Translation failed and fallback TTS also failed",
                     exc_info=True,
                 )
-            return
-
-        max_chars = self.config.get("tts_max_chars", 0)
-        if max_chars > 0 and len(translated) > max_chars:
-            logger.info(
-                f"[text_voice_lang_split] Translated text ({len(translated)} chars) "
-                f"exceeds max ({max_chars}), skip TTS"
-            )
-            result.result_content_type = ResultContentType.GENERAL_RESULT
-            result.use_t2i_ = False
-            self._streaming_texts.pop(self._get_session_key(event), None)
             return
 
         try:
@@ -164,6 +164,14 @@ class TextVoiceLangSplit(Star):
         if not tts_provider:
             return
 
+        max_chars = self.config.get("tts_max_chars", 0)
+        if max_chars > 0 and len(accumulated) > max_chars:
+            logger.info(
+                f"[text_voice_lang_split] Original text ({len(accumulated)} chars) "
+                f"exceeds max ({max_chars}), skip TTS"
+            )
+            return
+
         logger.info(
             f"[text_voice_lang_split] Streaming: translating '{accumulated[:50]}...'"
         )
@@ -188,14 +196,6 @@ class TextVoiceLangSplit(Star):
                     "[text_voice_lang_split] Streaming fallback TTS also failed",
                     exc_info=True,
                 )
-            return
-
-        max_chars = self.config.get("tts_max_chars", 0)
-        if max_chars > 0 and len(translated) > max_chars:
-            logger.info(
-                f"[text_voice_lang_split] Translated text ({len(translated)} chars) "
-                f"exceeds max ({max_chars}), skip TTS"
-            )
             return
 
         try:
