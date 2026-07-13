@@ -215,5 +215,5 @@ git push origin main
 ## Constraints
 
 - No external dependencies — all APIs are AstrBot built-ins
-- AstrBot >= 4.5.7 required (`llm_generate` API introduced here)
+- AstrBot >= 4.22.0 required (`llm_generate` API introduced in 4.5.7; `track_temporary_local_file` available from 4.22.0)
 - Python 3.10+ (AstrBot baseline)

@@ -62,7 +62,7 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 
 ## 要求
 
-- AstrBot >= 4.26.5
+- AstrBot >= 4.22.0
 - 已配置 LLM Provider（用于翻译）
 - 已配置 TTS Provider（用于合成语音）
 

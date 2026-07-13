@@ -11,7 +11,7 @@
 - 精简 `after_message_sent` 为仅清理 `_streaming_texts`，消除死代码
 - 修复 URL 正则会吃掉中文：`https?://\S+` 改为 `https?://[a-zA-Z0-9./?#&=\-+%:!*'();,@[\]~_$]+`，只匹配 ASCII URL 字符，中文标点和汉字不再被误吞
 - 新增会话级 TTS 开关检查：调用 `SessionServiceManager.should_process_tts_request()`，与 AstrBot 内置 TTS 保持一致，避免用户关闭会话 TTS 后仍产生语音
-- 修正 `astrbot_version` 兼容声明：`>=4.5.7` → `>=4.26.5`（`track_temporary_local_file` 等 API 在 v4.5.7 中不存在，实际最低测试版本为 v4.26.5）
+- 修正 `astrbot_version` 兼容声明：`>=4.5.7` → `>=4.22.0`（`track_temporary_local_file` 在 v4.22.0 引入）
 
 ## v1.3.1
 

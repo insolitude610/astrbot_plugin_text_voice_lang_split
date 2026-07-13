@@ -5,4 +5,4 @@ short_desc: Bot文本和语音使用不同语言，如显示中文+朗读日语
 author: solitude
 version: v1.4.1
 repo: https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
-astrbot_version: ">=4.26.5"
+astrbot_version: ">=4.22.0"
