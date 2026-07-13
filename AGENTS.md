@@ -69,7 +69,15 @@ Setting `result.result_content_type = ResultContentType.GENERAL_RESULT`:
 - ❌ Breaks segmented replies (`is_model_result()` returns False)
 - ❌ RespondStage extracts and sends `Record` components first → voice arrives before text
 
-These are framework-level tradeoffs. Attempting to fix segmentation by temporarily toggling `SessionServiceManager.set_tts_status_for_session()` was rejected: if `after_message_sent` doesn't fire (pipeline error), TTS stays permanently disabled in persistent storage.
+These are framework-level tradeoffs. Three approaches have been evaluated and rejected:
+
+1. **`SessionServiceManager.set_tts_status_for_session()` temporary toggle** (v1.5.2): if `after_message_sent` doesn't fire (pipeline error), TTS stays permanently disabled in persistent storage.
+
+2. **Session-level TTS suppression with lease + reference count + watchdog + token exactly-once** (v2.0 exploration, 2026-07): requires a state machine incorporating persistent storage, leases, timeouts, ref counting, baseline snapshots, atomic state transitions, and crash recovery — effectively a miniature distributed-systems library implemented inside a single plugin. Complexity is indefensible for what amounts to a per-message boolean.
+
+3. **Framework-level `result.use_tts_ = False`**: the clean solution — add a per-message TTS skip flag to AstrBot. Requires upstream PR; plugin can adopt when framework ships it.
+
+**Decision:** Segmented replies are documented as mutually exclusive with this plugin. Users choose one or the other. The `GENERAL_RESULT` mechanism is stable, well-tested, and avoids the entire class of concurrency/persistence/safety-net bugs that session-state manipulation introduces.
 
 ## `on_llm_response` — result_chain fallback
 
