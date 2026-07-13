@@ -133,7 +133,7 @@ class TextVoiceLangSplit(Star):
         if not text:
             return text
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-        text = re.sub(r"^.*?", "", text, flags=re.DOTALL)
+        text = re.sub(r"^.*?\s*response", "", text, flags=re.DOTALL)
         text = re.sub(r"</?think>", "", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
@@ -250,6 +250,8 @@ class TextVoiceLangSplit(Star):
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
         text = resp.completion_text
+        if not text and resp.result_chain:
+            text = resp.result_chain.get_plain_text()
         if not text:
             return
 
@@ -333,7 +335,14 @@ class TextVoiceLangSplit(Star):
 
         chain = MessageChain()
         chain.chain = [Record(file=audio_path, url=audio_path, text=translated)]
-        await self.context.send_message(event.unified_msg_origin, chain)
+        try:
+            await self.context.send_message(event.unified_msg_origin, chain)
+        except Exception:
+            logger.error(
+                "[text_voice_lang_split] Failed to send streaming voice follow-up",
+                exc_info=True,
+            )
+            return
 
         logger.info("[text_voice_lang_split] Streaming voice sent as follow-up")
 

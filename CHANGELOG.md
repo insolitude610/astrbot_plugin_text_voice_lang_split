@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.5.1
+
+- 修复 `_strip_thinking` 中 ` response` 正则的严重 bug：旧版 `\s*\presponse` 含非法转义 `\p`（Python 3.12 直接抛出 `re.error`），修正为 `\s*response`。此前 `_strip_thinking` 每次调用都崩溃，被 `_translate_text` 的 `except Exception` 静默吞掉，导致翻译一直"失败"返回 None，插件从未真正执行过思考剥离
+- `on_llm_response` 新增 `result_chain` fallback：Coze/Dify/DashScope 等第三方 Agent Runner 将文本放在 `LLMResponse.result_chain` 而非 `completion_text`，现在优先读 `completion_text`，为空时回退读 `result_chain.get_plain_text()`
+- `_send_streaming_follow_up` 中 `send_message` 包裹 try/except：防止语音发送失败反向污染已成功的文本流管线
+
 ## v1.5.0
 
 - 修复流式 wrapper 替换过晚导致无效的问题：`on_llm_response` 中替换 `result.async_stream` 在迭代已开始后才生效。改为在 `on_llm_request`（agent 运行前）中 patch `event.send_streaming`，在流式发送完成后 `finally` 触发语音跟进。无论流式还是非流式平台都能可靠工作
