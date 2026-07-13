@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.5.2
+
+- 修复主动消息（proactive chat）不触发 TTS 的问题：主动消息插件用 `context.llm_generate()` 直接取 LLM 回复，构造的 `MessageEventResult` 默认 `content_type` 为 `GENERAL_RESULT`，旧 guard `is_llm_result()` 只接受 `LLM_RESULT` 导致被跳过。改为检查 chain 中是否有文本 + 无已有 Record，不再依赖 `content_type` 判断
+
 ## v1.5.1
 
 - 修复 `_strip_thinking` 中 ` response` 正则的严重 bug：旧版 `\s*\presponse` 含非法转义 `\p`（Python 3.12 直接抛出 `re.error`），修正为 `\s*response`。此前 `_strip_thinking` 每次调用都崩溃，被 `_translate_text` 的 `except Exception` 静默吞掉，导致翻译一直"失败"返回 None，插件从未真正执行过思考剥离
