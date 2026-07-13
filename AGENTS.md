@@ -50,6 +50,14 @@ text = re.sub(r"^.*?\s*response", "", text, flags=re.DOTALL)
 
 The `\s*response` pattern strips DeepSeek-R1's ` response` separator. **Do NOT change to `\s*\presponse`** — `\p` is invalid in Python 3.12 regex and will crash `_strip_thinking` silently (caught by `except Exception` in `_translate_text`, causing all translations to fail).
 
+## `is_llm_result()` guard — DO NOT REMOVE
+
+Line 147: `if not result.is_llm_result(): return`. This deliberately excludes:
+- **Proactive chat messages** (they're `GENERAL_RESULT` and have their own TTS)
+- **Command responses** (`/provider list`, etc — should never be voiced)
+
+v1.5.2 attempted to replace this with chain inspection (`has_plain`/`has_record`) and was immediately reverted — it would have caused double TTS with proactive chat and unwanted TTS on command output.
+
 ## Emotion tags — English only
 
 FishAudio S2 uses natural-language `[bracket]` cues. English words are recognized; Japanese words (`[嬉しい]`) are spoken as text. A curated list of 28 preferred tags is embedded in the translation prompt, plus intensity modifiers (`[slightly]`, `[very]`, `[extremely]`).
@@ -61,7 +69,7 @@ Setting `result.result_content_type = ResultContentType.GENERAL_RESULT`:
 - ❌ Breaks segmented replies (`is_model_result()` returns False)
 - ❌ RespondStage extracts and sends `Record` components first → voice arrives before text
 
-These are framework-level tradeoffs; no plugin-side fix exists.
+These are framework-level tradeoffs. Attempting to fix segmentation by temporarily toggling `SessionServiceManager.set_tts_status_for_session()` was rejected: if `after_message_sent` doesn't fire (pipeline error), TTS stays permanently disabled in persistent storage.
 
 ## `on_llm_response` — result_chain fallback
 
