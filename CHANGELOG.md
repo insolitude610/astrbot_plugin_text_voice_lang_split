@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.4.2
+
+- 优化情绪标签 prompt：从硬限制 `"Choose ONLY from this list"` 改为 `"Prefer these tags"` 软引导，保留 24 个基础情绪并新增 `[friendly]`、`[helpful]`、`[encouraging]`、`[concerned]` 四个日常标签。新增 FishAudio 强度修饰支持：`[slightly]`、`[very]`、`[extremely]`（如 `[very happy]`）。强调使用英文标签而非日语——FishAudio S2 引擎对英文情绪词的映射远优于日语
+
 ## v1.4.1
 
 - 修复 TTS 朗读情绪标签文本的问题：翻译 prompt 改用 FishAudio 官方支持的英文情绪词（24 个封闭列表），替换之前因语言而异的 `[嬉しい]` 等日语标签。FishAudio S2 模型无法映射非英文情绪词为语音控制，会当作文本朗读出来；统一用英文情绪词 `[happy]`、`[sad]` 等确保正确识别
