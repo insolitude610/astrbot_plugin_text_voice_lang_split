@@ -156,6 +156,11 @@ class TextVoiceLangSplit(Star):
             logger.debug("[text_voice_lang_split] TTS disabled for session, skip")
             return
 
+        provider_config = self.context.get_config(event.unified_msg_origin)
+        if not provider_config.get("provider_tts_settings", {}).get("enable", False):
+            logger.debug("[text_voice_lang_split] TTS globally disabled, skip")
+            return
+
         plain_texts: list[tuple[int, Plain]] = []
         for i, comp in enumerate(result.chain):
             if isinstance(comp, Plain) and comp.text.strip():
@@ -227,6 +232,21 @@ class TextVoiceLangSplit(Star):
 
         logger.info("[text_voice_lang_split] Voice appended to result chain")
 
+    @filter.on_llm_request()
+    async def on_llm_request(self, event: AstrMessageEvent, req):
+        if getattr(event, "_tvls_stream_patched", False):
+            return
+        original = event.send_streaming
+
+        async def _patched(stream, *args, **kwargs):
+            try:
+                await original(stream, *args, **kwargs)
+            finally:
+                await self._send_streaming_follow_up(event, event.unified_msg_origin)
+
+        event.send_streaming = _patched
+        event._tvls_stream_patched = True
+
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
         text = resp.completion_text
@@ -235,21 +255,6 @@ class TextVoiceLangSplit(Star):
 
         session_key = self._get_session_key(event)
         self._streaming_texts[session_key] = text
-
-        result = event.get_result()
-        if result is None or result.async_stream is None:
-            return
-
-        original = result.async_stream
-
-        async def _injecting():
-            try:
-                async for chunk in original:
-                    yield chunk
-            finally:
-                await self._send_streaming_follow_up(event, session_key)
-
-        result.async_stream = _injecting()
 
     async def _send_streaming_follow_up(
         self, event: AstrMessageEvent, session_key: str
@@ -275,6 +280,11 @@ class TextVoiceLangSplit(Star):
 
         if not await SessionServiceManager.should_process_tts_request(event):
             logger.debug("[text_voice_lang_split] TTS disabled for session, skip")
+            return
+
+        provider_config = self.context.get_config(event.unified_msg_origin)
+        if not provider_config.get("provider_tts_settings", {}).get("enable", False):
+            logger.debug("[text_voice_lang_split] TTS globally disabled, skip")
             return
 
         filtered_text = self._filter_text_for_tts(accumulated)

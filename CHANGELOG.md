@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.5.0
+
+- 修复流式 wrapper 替换过晚导致无效的问题：`on_llm_response` 中替换 `result.async_stream` 在迭代已开始后才生效。改为在 `on_llm_request`（agent 运行前）中 patch `event.send_streaming`，在流式发送完成后 `finally` 触发语音跟进。无论流式还是非流式平台都能可靠工作
+- 新增全局 TTS enable 显式检查：`on_decorating_result` 和 `_send_streaming_follow_up` 中补充 `provider_tts_settings.enable` 检查，与 AstrBot 内置 TTS 行为一致。修复会话有已选 TTS provider 时 `get_using_tts_provider()` 跳过全局开关的漏洞
+
 ## v1.4.2
 
 - 优化情绪标签 prompt：从硬限制 `"Choose ONLY from this list"` 改为 `"Prefer these tags"` 软引导，保留 24 个基础情绪并新增 `[friendly]`、`[helpful]`、`[encouraging]`、`[concerned]` 四个日常标签。新增 FishAudio 强度修饰支持：`[slightly]`、`[very]`、`[extremely]`（如 `[very happy]`）。强调使用英文标签而非日语——FishAudio S2 引擎对英文情绪词的映射远优于日语
