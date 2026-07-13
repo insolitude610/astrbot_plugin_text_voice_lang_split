@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.4.1
+
+- 修复 TTS 朗读情绪标签文本的问题：翻译 prompt 改用 FishAudio 官方支持的英文情绪词（24 个封闭列表），替换之前因语言而异的 `[嬉しい]` 等日语标签。FishAudio S2 模型无法映射非英文情绪词为语音控制，会当作文本朗读出来；统一用英文情绪词 `[happy]`、`[sad]` 等确保正确识别
+
 ## v1.4.0
 
 - 修复流式模式下语音不发送的问题：RespondStage 对 `STREAMING_RESULT` 在 `send_streaming` 后直接 `return`，不触发 `after_message_sent`。改为在 `on_llm_response` 中用 async generator wrapper 注入流式跟进逻辑，在流式文本全部发送完毕后自动翻译+TTS+发送语音，不依赖 `after_message_sent`
