@@ -8,7 +8,7 @@ Two separate pipeline hooks handle different output modes:
 
 | Mode | Hook | Flow |
 |------|------|------|
-| Non-streaming (`LLM_RESULT`) | `@filter.on_decorating_result(priority=999)` | Filter non-speakable content → check speakable length → check `tts_max_chars` (on filtered text) → translate → call TTS → append `Record` to chain → set `ResultContentType.GENERAL_RESULT` + `use_t2i_=False` |
+| Non-streaming (`LLM_RESULT`) | `@filter.on_decorating_result(priority=999)` | Filter non-speakable content → check speakable length → check `tts_max_chars` (on filtered text) → translate → strip thinking artifacts → call TTS → append `Record` to chain → set `ResultContentType.GENERAL_RESULT` + `use_t2i_=False` |
 | Streaming (`STREAMING_RESULT`) | `@filter.on_llm_response` → `@filter.after_message_sent` | Capture `LLMResponse.completion_text` → after message sent, filter + translate + TTS + send voice as follow-up |
 
 Critical: `on_decorating_result` does NOT fire for `STREAMING_RESULT` (ResultDecorateStage skips it). The streaming path is the fallback for platforms that buffer streaming output (e.g. QQ个人号 via aiocqhttp).
@@ -41,7 +41,7 @@ In non-streaming mode, ALL THREE hooks (`on_llm_response`, `on_decorating_result
 
 ## on_decorating_result exit paths
 
-Seven return paths — this is a frequent source of bugs. ALL success/failure paths that reach the core flow must pop `self._streaming_texts` to prevent `after_message_sent` from double-firing.
+Ten return paths — this is a frequent source of bugs. ALL success/failure paths that reach the core flow must pop `self._streaming_texts` to prevent `after_message_sent` from double-firing.
 
 | Path | Trigger | Blocks built-in TTS? | Effect |
 |------|---------|---------------------|--------|
@@ -51,7 +51,7 @@ Seven return paths — this is a frequent source of bugs. ALL success/failure pa
 | No plain texts | Chain has no `Plain` components | No (returns before setting) | Early return — `_streaming_texts` NOT popped |
 | Nothing speakable after filtering | `_filter_text_for_tts()` returns < 2 chars | Yes (`GENERAL_RESULT`) | Silent, text only |
 | Exceeds `tts_max_chars` | `len(filtered_text) > max_chars` (checked AFTER filtering) | Yes (`GENERAL_RESULT`) | Silent, no voice |
-| Translation failed | `_translate_text` returns `None` | Yes (`GENERAL_RESULT`) | Silent, text only |
+| Translation failed | `_translate_text` returns `None` (timeout, error, or thinking-only output stripped empty) | Yes (`GENERAL_RESULT`) | Silent, text only |
 | TTS returned empty path | `get_audio()` returns `""` | Yes (`GENERAL_RESULT`) | Silent, no voice |
 | TTS generation failed | `tts_provider.get_audio()` raises | Yes (`GENERAL_RESULT`) | Silent, no voice |
 | Success | Appends `Record` to chain | Yes (`GENERAL_RESULT`) | Translated voice sent |
@@ -97,7 +97,7 @@ AstrBot acquires a session lock per `unified_msg_origin` before processing a mes
 
 ## Text filtering before translation
 
-`_filter_text_for_tts()` runs locally (zero LLM cost) before translation in both hooks. It strips visual noise in 5 steps — **order matters** (step 3 must run before step 4 for correct link handling):
+`_filter_text_for_tts()` runs locally (zero LLM cost) before translation in both hooks. It strips visual noise in 5 steps — **order matters** (step 2 must run before step 3 for correct link handling):
 
 1. Code blocks (`` ```...``` ``, `` `...` ``)
 2. Markdown links → keep display text (`[text](url)` → `text`)
@@ -149,6 +149,18 @@ With the provider timeout set low:
 - Total worst-case latency: ~15s (provider timeout) + 0.5s + ~15s ≈ 31s, vs ~60s+ without the fix
 
 The plugin's retry is the **safety net**; the provider timeout is the **real fix**.
+
+## Thinking/reasoning defense (v1.3.0+)
+
+Reasoning models (DeepSeek-R1, Gemini, etc.) may output internal monologue as part of `completion_text`, which gets spoken by TTS if not stripped. Two complementary layers prevent this:
+
+1. **`system_prompt`**: `_translate_text` passes a strict system prompt via `llm_generate(system_prompt=...)` that explicitly forbids reasoning output. This prevents most thinking at the source.
+
+2. **`_strip_thinking()`**: A `@staticmethod` that post-processes `completion_text` with regex — strips `<think>...</think>` blocks, strips content before `` markers, cleans orphan `</think>` tags, and collapses excess whitespace. Runs on the **translation output** (NOT the original text).
+
+If `_strip_thinking()` returns an empty string (everything was reasoning), the result is treated as translation failure (`return self._strip_thinking(raw) or None`), triggering the silent fallback path.
+
+The Gemini provider (`gemini_source.py`) relies exclusively on `part.thought == True` to separate thinking — it has NO `<think>` regex fallback unlike the OpenAI source. Community API proxies may strip the `thought` attribute. The plugin's `_strip_thinking` is the last line of defense regardless of provider quirks.
 
 ## Provider resolution
 
