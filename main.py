@@ -57,12 +57,20 @@ class TextVoiceLangSplit(Star):
                 coro = self.context.llm_generate(
                     chat_provider_id=provider_id,
                     prompt=prompt_full,
+                    system_prompt=(
+                        "You are a translator. Output ONLY the translated text "
+                        "with emotion tags in square brackets. Do NOT include "
+                        "any reasoning, thinking process, analysis, explanation, "
+                        "or internal monologue. Your entire response must contain "
+                        "nothing but the translation."
+                    ),
                 )
                 if timeout > 0:
                     llm_resp = await asyncio.wait_for(coro, timeout=timeout)
                 else:
                     llm_resp = await coro
-                return llm_resp.completion_text.strip()
+                raw = llm_resp.completion_text.strip()
+                return self._strip_thinking(raw) or None
             except asyncio.TimeoutError:
                 if attempt < 1:
                     logger.info(
@@ -93,9 +101,7 @@ class TextVoiceLangSplit(Star):
             try:
                 self._filter_patterns.append(re.compile(p))
             except re.error:
-                logger.warning(
-                    f"[text_voice_lang_split] Invalid regex pattern: {p}"
-                )
+                logger.warning(f"[text_voice_lang_split] Invalid regex pattern: {p}")
 
     def _filter_text_for_tts(self, text: str) -> str:
         if not text:
@@ -108,6 +114,16 @@ class TextVoiceLangSplit(Star):
         for pattern in self._filter_patterns:
             text = pattern.sub("", text)
         return text
+
+    @staticmethod
+    def _strip_thinking(text: str) -> str:
+        if not text:
+            return text
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        text = re.sub(r"^.*?", "", text, flags=re.DOTALL)
+        text = re.sub(r"</?think>", "", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
 
     @filter.on_decorating_result(priority=999)
     async def on_decorating_result(self, event: AstrMessageEvent):

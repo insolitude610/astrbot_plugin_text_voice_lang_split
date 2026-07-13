@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.3.0
+
+- 防御翻译 LLM 输出思考/推理内容混入 TTS 的问题：在翻译请求中加入 `system_prompt` 明确禁止输出推理过程，同时新增 `_strip_thinking` 后处理剥离 `<think>...</think>` 块和 `<｜end▁of▁thinking｜>` 标记等常见思考产物。针对推理模型（如 DeepSeek-R1、Gemini 等）在翻译时可能输出内心独白、且 API 代理可能丢失原生 `thought` 标志的场景提供兜底
+- `_strip_thinking` 剥离后若文本为空则视为翻译失败，走静默回退路径
+
 ## v1.2.2
 
 - 修复翻译 LLM 频繁超时问题：超时后增加 0.5s 延迟重试一次，给 httpx 连接池时间清理被 `asyncio.wait_for` 强制取消后残留的半死连接，避免后续请求复用脏连接导致的连锁超时

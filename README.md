@@ -11,6 +11,7 @@
 - 跨平台通用（Windows / macOS / Linux）
 - WebUI 可视化配置
 - TTS 前自动过滤不适合朗读的内容（颜文字、代码块、URL、Markdown 格式等），仅剥离视觉噪声，不做机械替换
+- 自动剥离翻译 LLM 输出的思考/推理内容（`<think>...</think>` 块、` response 标记等），防止推理模型将内心独白混入语音
 - 翻译失败/超时/原文过长自动静默，不中断正常对话
 - 自动检测 Agent Live 模式并跳过插件 TTS，避免与内置分句 TTS 冲突导致 429
 
@@ -67,7 +68,7 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 
 ## 原理
 
-**非流式模式：** 在消息装饰阶段（`on_decorating_result`）拦截 LLM 的文本结果 → 过滤颜文字/代码块/URL 等视觉噪声 → 调用 LLM 翻译清洁文本（同时自动插入情绪标签如 `[嬉しい]`，支持 FishAudio 等 TTS 的情感语音）→ 调用 TTS Provider 生成语音 → 重组消息链为 `[原文文本] + [目标语言语音]`，阻止内置 TTS 重复触发。
+**非流式模式：** 在消息装饰阶段（`on_decorating_result`）拦截 LLM 的文本结果 → 过滤颜文字/代码块/URL 等视觉噪声 → 调用 LLM 翻译清洁文本（同时自动插入情绪标签如 `[嬉しい]`，支持 FishAudio 等 TTS 的情感语音）→ 剥离翻译输出中的思考/推理产物 → 调用 TTS Provider 生成语音 → 重组消息链为 `[原文文本] + [目标语言语音]`，阻止内置 TTS 重复触发。
 
 **流式模式：** 捕获 LLM 完整响应文本（`on_llm_response`）→ 文本正常流式发送 → 发送完成后翻译 + TTS 生成语音跟进（`after_message_sent`）。
 
