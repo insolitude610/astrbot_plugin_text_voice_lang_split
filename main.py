@@ -8,6 +8,7 @@ from astrbot.api.star import Context, Star
 from astrbot.core.message.components import Plain, Record
 from astrbot.core.message.message_event_result import ResultContentType
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
+from astrbot.core.star.session_llm_manager import SessionServiceManager
 
 
 class TextVoiceLangSplit(Star):
@@ -112,7 +113,7 @@ class TextVoiceLangSplit(Star):
         text = re.sub(r"```[\s\S]*?```", "", text)
         text = re.sub(r"`[^`]+`", "", text)
         text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
-        text = re.sub(r"https?://\S+", "", text)
+        text = re.sub(r"https?://[a-zA-Z0-9./?#&=\-+%:!*'();,@[\]~_$]+", "", text)
         text = re.sub(r"[*_~]{1,3}", "", text)
         for pattern in self._filter_patterns:
             text = pattern.sub("", text)
@@ -140,6 +141,10 @@ class TextVoiceLangSplit(Star):
         tts_provider = self.context.get_using_tts_provider(event.unified_msg_origin)
         if not tts_provider:
             logger.debug("[text_voice_lang_split] No TTS provider configured, skip")
+            return
+
+        if not await SessionServiceManager.should_process_tts_request(event):
+            logger.debug("[text_voice_lang_split] TTS disabled for session, skip")
             return
 
         plain_texts: list[tuple[int, Plain]] = []
@@ -213,10 +218,33 @@ class TextVoiceLangSplit(Star):
 
         logger.info("[text_voice_lang_split] Voice appended to result chain")
 
-    @filter.after_message_sent(priority=999)
-    async def after_message_sent(self, event: AstrMessageEvent):
-        session_key = self._get_session_key(event)
+    @filter.on_llm_response()
+    async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
+        text = resp.completion_text
+        if not text:
+            return
 
+        session_key = self._get_session_key(event)
+        self._streaming_texts[session_key] = text
+
+        result = event.get_result()
+        if result is None or result.async_stream is None:
+            return
+
+        original = result.async_stream
+
+        async def _injecting():
+            try:
+                async for chunk in original:
+                    yield chunk
+            finally:
+                await self._send_streaming_follow_up(event, session_key)
+
+        result.async_stream = _injecting()
+
+    async def _send_streaming_follow_up(
+        self, event: AstrMessageEvent, session_key: str
+    ) -> None:
         if event.get_extra("action_type") == "live":
             logger.info(
                 "[text_voice_lang_split] Agent live mode detected, "
@@ -234,6 +262,10 @@ class TextVoiceLangSplit(Star):
 
         tts_provider = self.context.get_using_tts_provider(event.unified_msg_origin)
         if not tts_provider:
+            return
+
+        if not await SessionServiceManager.should_process_tts_request(event):
+            logger.debug("[text_voice_lang_split] TTS disabled for session, skip")
             return
 
         filtered_text = self._filter_text_for_tts(accumulated)
@@ -286,14 +318,10 @@ class TextVoiceLangSplit(Star):
 
         logger.info("[text_voice_lang_split] Streaming voice sent as follow-up")
 
-    @filter.on_llm_response()
-    async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
-        text = resp.completion_text
-        if not text:
-            return
-
+    @filter.after_message_sent(priority=999)
+    async def after_message_sent(self, event: AstrMessageEvent):
         session_key = self._get_session_key(event)
-        self._streaming_texts[session_key] = text
+        self._streaming_texts.pop(session_key, None)
 
     async def terminate(self):
         logger.info("[text_voice_lang_split] Plugin terminated")

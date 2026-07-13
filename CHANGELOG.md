@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.4.0
+
+- 修复流式模式下语音不发送的问题：RespondStage 对 `STREAMING_RESULT` 在 `send_streaming` 后直接 `return`，不触发 `after_message_sent`。改为在 `on_llm_response` 中用 async generator wrapper 注入流式跟进逻辑，在流式文本全部发送完毕后自动翻译+TTS+发送语音，不依赖 `after_message_sent`
+- 新增 `_send_streaming_follow_up` 方法，抽取原 `after_message_sent` 的流式翻译+TTS 逻辑，被 async_stream wrapper 复用
+- 精简 `after_message_sent` 为仅清理 `_streaming_texts`，消除死代码
+- 修复 URL 正则会吃掉中文：`https?://\S+` 改为 `https?://[a-zA-Z0-9./?#&=\-+%:!*'();,@[\]~_$]+`，只匹配 ASCII URL 字符，中文标点和汉字不再被误吞
+- 新增会话级 TTS 开关检查：调用 `SessionServiceManager.should_process_tts_request()`，与 AstrBot 内置 TTS 保持一致，避免用户关闭会话 TTS 后仍产生语音
+- 修正 `astrbot_version` 兼容声明：`>=4.5.7` → `>=4.26.5`（`track_temporary_local_file` 等 API 在 v4.5.7 中不存在，实际最低测试版本为 v4.26.5）
+
 ## v1.3.1
 
 - 强化翻译 prompt：明确要求每个方括号内只能有一个情绪标签（如 `[嬉しい]`），禁止多情绪挤一个括号（如 `[嬉しい 悲しい]`）。多情绪时只选最主要的一个，确保 FishAudio 等 TTS 的情绪控制能正确识别

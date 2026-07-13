@@ -62,7 +62,7 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 
 ## 要求
 
-- AstrBot >= 4.5.7
+- AstrBot >= 4.26.5
 - 已配置 LLM Provider（用于翻译）
 - 已配置 TTS Provider（用于合成语音）
 
@@ -70,7 +70,7 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 
 **非流式模式：** 在消息装饰阶段（`on_decorating_result`）拦截 LLM 的文本结果 → 过滤颜文字/代码块/URL 等视觉噪声 → 调用 LLM 翻译清洁文本（同时自动插入情绪标签如 `[嬉しい]`，支持 FishAudio 等 TTS 的情感语音）→ 剥离翻译输出中的思考/推理产物 → 调用 TTS Provider 生成语音 → 重组消息链为 `[原文文本] + [目标语言语音]`，阻止内置 TTS 重复触发。
 
-**流式模式：** 捕获 LLM 完整响应文本（`on_llm_response`）→ 文本正常流式发送 → 发送完成后翻译 + TTS 生成语音跟进（`after_message_sent`）。
+**流式模式：** 在 `on_llm_response` 捕获 LLM 完整响应文本，并用 async generator wrapper 注入流式发送 → 流式文本全部发送完毕后自动翻译 + TTS 生成语音跟进。不依赖 `after_message_sent`（AstrBot 的 RespondStage 对 `STREAMING_RESULT` 提前 return，该钩子不会触发）。
 
 ## 作者的话
 
