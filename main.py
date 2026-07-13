@@ -144,9 +144,7 @@ class TextVoiceLangSplit(Star):
         if not result or not result.chain:
             return
 
-        has_plain = any(isinstance(c, Plain) and c.text.strip() for c in result.chain)
-        has_record = any(isinstance(c, Record) for c in result.chain)
-        if not has_plain or has_record:
+        if not result.is_llm_result():
             return
 
         tts_provider = self.context.get_using_tts_provider(event.unified_msg_origin)
