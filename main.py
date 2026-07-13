@@ -27,10 +27,13 @@ class TextVoiceLangSplit(Star):
 
         prompt = (
             f"Translate the following text into {voice_lang}. "
-            f"At the beginning of each sentence, insert a suitable emotion tag "
-            f"in {voice_lang} wrapped in square brackets "
+            f"At the beginning of each sentence, insert ONE suitable emotion tag "
+            f"in {voice_lang} wrapped in square brackets. "
+            f"Each bracket must contain only a single emotion "
             f"(e.g. [嬉しい], [悲しい] in Japanese, [happy], [sad] in English). "
-            f"Choose tags based on the emotional tone of the original text. "
+            f"DO NOT put multiple emotions in one bracket like [嬉しい 悲しい] "
+            f"or [happy, sad]. If a sentence has multiple emotions, "
+            f"choose only the most dominant one. "
             f"If a sentence has no clear emotion, omit the tag. "
             f"Only output the translated text with tags, nothing else."
         )
