@@ -14,3 +14,4 @@ build/
 .DS_Store
 Thumbs.db
 data/
+tests/
