@@ -3,6 +3,6 @@ display_name: 文本语音语言分离 (Text-Voice Lang Split)
 desc: 让Bot展示中文文本的同时，用其他语言(如日语)合成语音。支持任意TTS提供商，兼容流式/非流式模式，跨平台通用。
 short_desc: Bot文本和语音使用不同语言，如显示中文+朗读日语
 author: solitude
-version: v1.5.1
+version: v1.6.0
 repo: https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 astrbot_version: ">=4.22.0"

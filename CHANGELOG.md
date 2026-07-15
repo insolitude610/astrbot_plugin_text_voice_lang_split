@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.6.0
+
+- **重写翻译提示词为通用多语言版本**：不再硬编码日语规则，提示词通过 `{voice_lang}` 动态适配任意目标语言。`=== NATIVE TARGET-LANGUAGE TRANSLATION ===` 板块要求 LLM 完全遵循目标语言的惯用表达、标点、语法和称呼，禁止机械直译
+- **用户自定义指令提升为高优先级**：`translate_instructions` 不再仅追加到提示词末尾，而是在 `=== USER TRANSLATION INSTRUCTIONS (HIGH PRIORITY) ===` 板块中前置，明确覆盖默认风格建议。用户可控制文体、角色口吻、敬语、方言、标签偏好等，只有直接违反 TTS 安全底线的部分才被忽略
+- **情绪标签策略收紧为安全默认 + 用户可按需扩展**：默认允许列表缩小为 12 个受约束的标签（`[happy] [calm] [relaxed] [nervous] [worried] [embarrassed] [curious] [confident] [grateful] [empathetic] [slightly sad] [slightly surprised]`），用户可通过 `translate_instructions` 请求额外的纯情绪标签（如 `[sad]`、`[angry]`），但禁止 medium/extreme 修饰符和所有非语言发声标签
+- **系统提示词重写**：明确要求 LLM 严格使用任务提示词中指定的目标语言，不预设任何语言；强调用户指令高优先级；统一禁止 pause/break、音效、身体发声、音量、phoneme 标记
+- **安全口语措辞规则泛化**：哭声、喘息、嘶吼、拟声词等禁用规则不再引用日语特例（如 うぅ、にゃん），改为跨语言通用描述
+- 移除 `prompt_full` 中间变量，翻译源文本直接嵌入 `prompt` 末尾
+
 ## v1.5.1
 
 - 修复 `_strip_thinking` 中 ` response` 正则的严重 bug：旧版 `\s*\presponse` 含非法转义 `\p`（Python 3.12 直接抛出 `re.error`），修正为 `\s*response`。此前 `_strip_thinking` 每次调用都崩溃，被 `_translate_text` 的 `except Exception` 静默吞掉，导致翻译一直"失败"返回 None，插件从未真正执行过思考剥离
