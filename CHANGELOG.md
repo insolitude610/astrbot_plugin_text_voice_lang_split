@@ -4,6 +4,9 @@
 
 - **新增 LLM 自主判断语音开关**：新增 `enable_llm_voice_tool` 配置项，开启后插件注册 `tvls_send_voice` 函数工具，由 LLM 自行判断当前回复是否需要发送语音。适用于需要对话语境感知的场景，如闲聊时发语音、代码/列表时跳过。关闭时保持默认行为（每条消息都生成语音）
 - 新增 `tools/voice_tool.py`：`VoiceTool` 作为轻量标记工具，调用时仅设置事件标记，翻译+TTS 仍在 pipeline 后续阶段执行
+- **修复 tool-loop agent 重复文字 bug**：AstrBot 的 `tool_loop_agent_runner` 在 LLM 调用工具时会多次触发 `on_decorating_result`，导致同一段文字被发送两次（首次无语声，第二次带语声）。新增 `_tvls_decorated` 去重守卫，仅首次调用处理文本，后续调用全部拦截
+- **新增延迟语音跟进机制**：当 LLM 在工具循环中调用 `tvls_send_voice` 时文本可能已被首次 `on_decorating_result` 发送。此时将待发送文本暂存，后续轮次检测到标记+文本后自动翻译+TTS 作为独立跟进消息发送
+- **修复空链误标记 bug**：`_tvls_decorated` 标记从文本提取前移至文本提取后设置，避免 tool loop 第一轮空链时提前设标记导致后续有文本的轮次被误杀
 
 ## v1.6.0
 
