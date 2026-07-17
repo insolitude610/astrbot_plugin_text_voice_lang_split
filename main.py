@@ -240,6 +240,14 @@ class TextVoiceLangSplit(Star):
         if not result.is_llm_result():
             return
 
+        if event.get_extra("_tvls_decorated", False):
+            self._maybe_send_deferred_voice(event)
+            result.result_content_type = ResultContentType.GENERAL_RESULT
+            result.use_t2i_ = False
+            return
+
+        event.set_extra("_tvls_decorated", True)
+
         tts_provider = self.context.get_using_tts_provider(event.unified_msg_origin)
         if not tts_provider:
             logger.debug("[text_voice_lang_split] No TTS provider configured, skip")
@@ -253,17 +261,6 @@ class TextVoiceLangSplit(Star):
         if not provider_config.get("provider_tts_settings", {}).get("enable", False):
             logger.debug("[text_voice_lang_split] TTS globally disabled, skip")
             return
-
-        if self.config.get("enable_llm_voice_tool", False):
-            if not event.get_extra("_tvls_voice_requested", False):
-                logger.debug(
-                    "[text_voice_lang_split] Voice tool enabled but LLM did not "
-                    "request voice, skipping"
-                )
-                result.result_content_type = ResultContentType.GENERAL_RESULT
-                result.use_t2i_ = False
-                self._streaming_texts.pop(self._get_session_key(event), None)
-                return
 
         plain_texts: list[tuple[int, Plain]] = []
         for i, comp in enumerate(result.chain):
@@ -297,6 +294,18 @@ class TextVoiceLangSplit(Star):
             result.use_t2i_ = False
             self._streaming_texts.pop(self._get_session_key(event), None)
             return
+
+        if self.config.get("enable_llm_voice_tool", False):
+            if not event.get_extra("_tvls_voice_requested", False):
+                logger.debug(
+                    "[text_voice_lang_split] Voice tool enabled but LLM did not "
+                    "request voice, storing pending voice"
+                )
+                event.set_extra("_tvls_pending_text", filtered_text)
+                result.result_content_type = ResultContentType.GENERAL_RESULT
+                result.use_t2i_ = False
+                self._streaming_texts.pop(self._get_session_key(event), None)
+                return
 
         logger.info(f"[text_voice_lang_split] Translating: '{full_text[:50]}...'")
 
@@ -459,10 +468,72 @@ class TextVoiceLangSplit(Star):
 
         logger.info("[text_voice_lang_split] Streaming voice sent as follow-up")
 
+    def _maybe_send_deferred_voice(self, event: AstrMessageEvent) -> None:
+        if not self.config.get("enable_llm_voice_tool", False):
+            return
+        if not event.get_extra("_tvls_voice_requested", False):
+            return
+        pending = event.get_extra("_tvls_pending_text", None)
+        if not pending:
+            return
+        if event.get_extra("_tvls_deferred_voice_sent", False):
+            return
+        event.set_extra("_tvls_deferred_voice_sent", True)
+        event.clear_extra("_tvls_pending_text")
+        logger.info(
+            "[text_voice_lang_split] Deferred voice triggered "
+            f"(pending text: '{pending[:50]}...')"
+        )
+        asyncio.create_task(self._send_deferred_voice(event, pending))
+
+    async def _send_deferred_voice(
+        self, event: AstrMessageEvent, text: str
+    ) -> None:
+        tts_provider = self.context.get_using_tts_provider(event.unified_msg_origin)
+        if not tts_provider:
+            logger.debug(
+                "[text_voice_lang_split] No TTS provider for deferred voice, skip"
+            )
+            return
+
+        translated = await self._translate_text(text, event)
+        if not translated:
+            logger.info("[text_voice_lang_split] Deferred voice translation failed")
+            return
+
+        try:
+            audio_path = await tts_provider.get_audio(translated)
+            if not audio_path:
+                logger.error(
+                    "[text_voice_lang_split] Deferred voice TTS returned empty path"
+                )
+                return
+            event.track_temporary_local_file(audio_path)
+        except Exception:
+            logger.error(
+                "[text_voice_lang_split] Deferred voice TTS generation failed",
+                exc_info=True,
+            )
+            return
+
+        chain = MessageChain()
+        chain.chain = [Record(file=audio_path, url=audio_path, text=translated)]
+        try:
+            await self.context.send_message(event.unified_msg_origin, chain)
+        except Exception:
+            logger.error(
+                "[text_voice_lang_split] Failed to send deferred voice",
+                exc_info=True,
+            )
+            return
+
+        logger.info("[text_voice_lang_split] Deferred voice sent as follow-up")
+
     @filter.after_message_sent(priority=999)
     async def after_message_sent(self, event: AstrMessageEvent):
         session_key = self._get_session_key(event)
         self._streaming_texts.pop(session_key, None)
+        self._maybe_send_deferred_voice(event)
 
     async def terminate(self):
         logger.info("[text_voice_lang_split] Plugin terminated")
