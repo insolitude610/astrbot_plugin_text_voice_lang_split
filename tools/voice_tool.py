@@ -20,11 +20,13 @@ class VoiceTool(FunctionTool[AstrAgentContext]):
         "brief confirmations, or information-dense technical data, "
         "you may skip calling this tool to avoid unnecessary voice output."
     )
-    parameters: dict = field(default_factory=lambda: {
-        "type": "object",
-        "properties": {},
-        "required": [],
-    })
+    parameters: dict = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        }
+    )
 
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs: Any

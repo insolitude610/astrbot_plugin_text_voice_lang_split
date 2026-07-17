@@ -115,7 +115,7 @@ class TextVoiceLangSplit(Star):
             f"- Do not add written cries, screams, sobs, breaths, moans, gasps, "
             f"or acted sound imitations in any language. "
             f"Avoid repeated vowels, syllables, or characters used to imitate "
-            f"prolonged sounds, such as \"aaaah\", \"waaa\", or written sobbing.\n"
+            f'prolonged sounds, such as "aaaah", "waaa", or written sobbing.\n'
             f"- When the source contains such a reaction, translate its meaning "
             f"into concise normal speech unless the user explicitly requires "
             f"a literal quotation. Even then, avoid elongating or repeating "
