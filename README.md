@@ -49,6 +49,7 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 | `tts_max_chars` | `0` | 过滤后的文本超过此字符数时跳过翻译和 TTS。设为 0 不限制 |
 | `remove_patterns` | (见默认值) | TTS 文本过滤正则规则。匹配到的内容在翻译前删除，用于过滤颜文字、装饰符号等视觉噪声 |
 | `streaming_follow_up_delay` | `1.5` | 流式模式下语音跟进的延迟(秒) |
+| `enable_llm_voice_tool` | `false` | LLM 自主判断是否发送语音。开启后注册 `tvls_send_voice` 工具，LLM 自行决定是否朗读当前回复 |
 
 **Provider 优先级：** `translate_provider`（手动指定）> 聊天 `/provider` 切换 > 默认 Provider。
 
@@ -73,6 +74,8 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 **非流式模式：** 在消息装饰阶段（`on_decorating_result`）拦截 LLM 的文本结果 → 过滤颜文字/代码块/URL 等视觉噪声 → 调用 LLM 翻译清洁文本（同时自动插入情绪标签如 `[嬉しい]`，支持 FishAudio 等 TTS 的情感语音）→ 剥离翻译输出中的思考/推理产物 → 调用 TTS Provider 生成语音 → 重组消息链为 `[原文文本] + [目标语言语音]`，阻止内置 TTS 重复触发。
 
 **流式模式：** 在 `on_llm_response` 捕获 LLM 完整响应文本，并用 async generator wrapper 注入流式发送 → 流式文本全部发送完毕后自动翻译 + TTS 生成语音跟进。不依赖 `after_message_sent`（AstrBot 的 RespondStage 对 `STREAMING_RESULT` 提前 return，该钩子不会触发）。
+
+**LLM 自主判断语音：** 开启 `enable_llm_voice_tool` 后，插件注册 `tvls_send_voice` 函数工具。LLM 在生成回复时可以调用该工具来标记"此回复需要语音"。工具本身只设置事件标记，实际的翻译+TTS 仍在 pipeline 后续阶段执行。LLM 未调用工具时则跳过语音，仅发送文字。这允许 LLM 根据对话语境自行判断——闲聊、情感交流时发语音，代码、列表、表格时跳过。
 
 ## 作者的话
 

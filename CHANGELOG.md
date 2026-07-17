@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.7.0
+
+- **新增 LLM 自主判断语音开关**：新增 `enable_llm_voice_tool` 配置项，开启后插件注册 `tvls_send_voice` 函数工具，由 LLM 自行判断当前回复是否需要发送语音。适用于需要对话语境感知的场景，如闲聊时发语音、代码/列表时跳过。关闭时保持默认行为（每条消息都生成语音）
+- 新增 `tools/voice_tool.py`：`VoiceTool` 作为轻量标记工具，调用时仅设置事件标记，翻译+TTS 仍在 pipeline 后续阶段执行
+
 ## v1.6.0
 
 - **重写翻译提示词为通用多语言版本**：不再硬编码日语规则，提示词通过 `{voice_lang}` 动态适配任意目标语言。`=== NATIVE TARGET-LANGUAGE TRANSLATION ===` 板块要求 LLM 完全遵循目标语言的惯用表达、标点、语法和称呼，禁止机械直译

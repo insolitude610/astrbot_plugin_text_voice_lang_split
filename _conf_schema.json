@@ -36,6 +36,12 @@
     "default": 0,
     "hint": "过滤后的文本超过此字符数时跳过翻译和 TTS 生成，仅发送文字。设为 0 表示不限制"
   },
+  "enable_llm_voice_tool": {
+    "description": "LLM 自主判断是否发送语音",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后插件会注册语音工具 (tvls_send_voice)，由 LLM 自行判断当前回复是否需要朗读。关闭时保持默认行为：每条消息都生成语音"
+  },
   "remove_patterns": {
     "description": "TTS 文本过滤正则规则",
     "type": "list",

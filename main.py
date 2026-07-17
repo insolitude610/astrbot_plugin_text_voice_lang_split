@@ -10,6 +10,8 @@ from astrbot.core.message.message_event_result import ResultContentType
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.star.session_llm_manager import SessionServiceManager
 
+from .tools import VoiceTool
+
 
 class TextVoiceLangSplit(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -17,10 +19,16 @@ class TextVoiceLangSplit(Star):
         self.config = config
         self._streaming_texts: dict[str, str] = {}
         self._filter_patterns: list = []
+        self._voice_tool: VoiceTool | None = None
         self._compile_filter_patterns()
 
     async def initialize(self):
         logger.info("[text_voice_lang_split] Plugin initialized")
+
+        if self._voice_tool is None:
+            self._voice_tool = VoiceTool(plugin=self)
+        self._voice_tool.active = self.config.get("enable_llm_voice_tool", False)
+        self.context.add_llm_tools(self._voice_tool)
 
     async def _translate_text(self, text: str, event: AstrMessageEvent) -> str | None:
         voice_lang = self.config.get("voice_language", "Japanese")
@@ -246,6 +254,17 @@ class TextVoiceLangSplit(Star):
             logger.debug("[text_voice_lang_split] TTS globally disabled, skip")
             return
 
+        if self.config.get("enable_llm_voice_tool", False):
+            if not event.get_extra("_tvls_voice_requested", False):
+                logger.debug(
+                    "[text_voice_lang_split] Voice tool enabled but LLM did not "
+                    "request voice, skipping"
+                )
+                result.result_content_type = ResultContentType.GENERAL_RESULT
+                result.use_t2i_ = False
+                self._streaming_texts.pop(self._get_session_key(event), None)
+                return
+
         plain_texts: list[tuple[int, Plain]] = []
         for i, comp in enumerate(result.chain):
             if isinstance(comp, Plain) and comp.text.strip():
@@ -353,6 +372,15 @@ class TextVoiceLangSplit(Star):
             )
             self._streaming_texts.pop(session_key, None)
             return
+
+        if self.config.get("enable_llm_voice_tool", False):
+            if not event.get_extra("_tvls_voice_requested", False):
+                logger.debug(
+                    "[text_voice_lang_split] Voice tool enabled but LLM did not "
+                    "request voice, skipping streaming follow-up"
+                )
+                self._streaming_texts.pop(session_key, None)
+                return
 
         accumulated = self._streaming_texts.pop(session_key, None)
         if accumulated is None:
