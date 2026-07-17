@@ -2,13 +2,14 @@
 
 ## Architecture
 
-AstrBot plugin that translates LLM text before TTS, enabling display in one language and speech in another. Three pipeline hooks handle different output modes:
+AstrBot plugin that translates LLM text before TTS, enabling display in one language and speech in another. Three pipeline hooks + deferred voice mechanism handle different output modes:
 
 | Mode | Hook | Mechanism |
 |------|------|-----------|
 | Non-streaming | `@filter.on_decorating_result(priority=999)` | Filter → translate → TTS → append `Record` → set `GENERAL_RESULT` |
 | Streaming | `@filter.on_llm_request` → `@filter.on_llm_response` | `on_llm_request` patches `event.send_streaming` with `finally` voice follow-up; `on_llm_response` stores text |
-| Guard | `@filter.after_message_sent(priority=999)` | Only pops stale `_streaming_texts` entries (double-TTS prevention) |
+| Guard | `@filter.after_message_sent(priority=999)` | Cleans `_streaming_texts` + triggers `_maybe_send_deferred_voice` as last-resort fallback |
+| Deferred voice (v1.7.0) | Subsequent `on_decorating_result` calls + `after_message_sent` | When LLM calls `tvls_send_voice` after text is already sent by first `on_decorating_result`, deferred voice translates+TTS+ sends as independent follow-up message |
 
 Key: `on_decorating_result` does NOT fire for `STREAMING_RESULT`. `after_message_sent` does NOT fire for `STREAMING_RESULT` (RespondStage returns before dispatch). Streaming voice is sent by the patched `send_streaming` wrapper.
 
@@ -28,6 +29,59 @@ RespondStage { send_streaming called → patched wrapper sends voice after strea
 OnAfterMessageSentEvent → after_message_sent (non-streaming only)
 ```
 
+## v1.7.0: LLM voice tool + deferred voice
+
+### `tvls_send_voice` FunctionTool
+
+When `enable_llm_voice_tool` is `true`, `initialize()` registers a `VoiceTool` (`tools/voice_tool.py`) via `self.context.add_llm_tools()`. It extends `FunctionTool[AstrAgentContext]` and sets `event.set_extra("_tvls_voice_requested", True)` when LLM calls it. The `active` field is toggled by config. Off → tool hidden from LLM; plugin always generates voice.
+
+### Tool-loop agent runner quirk — CRITICAL
+
+AstrBot's `tool_loop_agent_runner` fires `on_decorating_result` at **each tool-call iteration**, not just once. Typical flow:
+
+```
+1. LLM generates text "hello world"
+2. on_decorating_result #1 → text sent (no tool marker yet)
+3. LLM calls tvls_send_voice → marker set
+4. on_decorating_result #2 → same text AGAIN (bug: double output)
+```
+
+This caused two bugs fixed in v1.7.0:
+- **Double text**: Same message sent twice (first without voice, second with voice)
+- **Deferred voice lost**: If first iteration has empty chain and second has text, voice was never sent
+
+### `_tvls_decorated` dedup guard — DO NOT MOVE
+
+Lines 243-247: Guard checks `event.get_extra("_tvls_decorated")`. If set, blocks duplicate output and calls `_maybe_send_deferred_voice(event)`.
+
+```
+# At top after is_llm_result() check:
+if event.get_extra("_tvls_decorated", False):
+    self._maybe_send_deferred_voice(event)
+    result.result_content_type = ResultContentType.GENERAL_RESULT
+    result.use_t2i_ = False
+    return
+```
+
+**CRITICAL: `event.set_extra("_tvls_decorated", True)` must be placed AFTER `if not plain_texts: return` (line 273), not before.** If placed before text extraction, empty-chain calls (tool loop iteration with no text) falsely mark the event as processed, permanently blocking subsequent calls with actual text from generating voice.
+
+### Deferred voice event extras
+
+Four extras on `event` control the deferred voice flow:
+
+| Extra key | Set by | Cleared by | Purpose |
+|-----------|--------|------------|---------|
+| `_tvls_decorated` | First `on_decorating_result` with text | Not cleared | Blocks duplicate calls |
+| `_tvls_voice_requested` | `VoiceTool.call()` | Not cleared | LLM called the tool |
+| `_tvls_pending_text` | First `on_decorating_result` when gate fires (tool ON, no marker) | `_maybe_send_deferred_voice` on trigger | Text to speak if voice deferred |
+| `_tvls_deferred_voice_sent` | `_maybe_send_deferred_voice` on trigger | Not cleared | Prevents double voice send |
+
+`_maybe_send_deferred_voice` is called from 3 sites (subsequent `on_decorating_result`, `after_message_sent`). The `_tvls_deferred_voice_sent` guard prevents double-triggering across all three.
+
+### Deferred voice send
+
+`_send_deferred_voice` is spawned via `asyncio.create_task()`. It independently: gets TTS provider → translates → generates audio → sends as follow-up `MessageChain` with `Record`. Error handling wraps each async step.
+
 ## Streaming voice mechanism (v1.5.0+)
 
 `on_llm_request` runs BEFORE agent. It monkey-patches `event.send_streaming`:
@@ -39,7 +93,7 @@ event.send_streaming = lambda stream, *a, **kw: (
 )
 ```
 
-This is superior to the old async_stream wrapper approach because it patches before the stream is created, not during iteration. Guarded by `_tvls_stream_patched` flag to prevent double-patching.
+Guarded by `_tvls_stream_patched` flag to prevent double-patching. Streaming `_send_streaming_follow_up` also checks `_tvls_voice_requested` when `enable_llm_voice_tool` is ON.
 
 ## `_strip_thinking` regex — CRITICAL
 
@@ -52,11 +106,11 @@ The `\s*response` pattern strips DeepSeek-R1's ` response` separator. **Do NOT c
 
 ## `is_llm_result()` guard — DO NOT REMOVE
 
-Line 147: `if not result.is_llm_result(): return`. This deliberately excludes:
+Line 240: `if not result.is_llm_result(): return`. This deliberately excludes:
 - **Proactive chat messages** (they're `GENERAL_RESULT` and have their own TTS)
 - **Command responses** (`/provider list`, etc — should never be voiced)
 
-v1.5.2 attempted to replace this with chain inspection (`has_plain`/`has_record`) and was immediately reverted — it would have caused double TTS with proactive chat and unwanted TTS on command output.
+v1.5.2 attempted to replace this with chain inspection and was immediately reverted — it would have caused double TTS with proactive chat and unwanted TTS on command output.
 
 ## Emotion tags — English only
 
@@ -69,15 +123,7 @@ Setting `result.result_content_type = ResultContentType.GENERAL_RESULT`:
 - ❌ Breaks segmented replies (`is_model_result()` returns False)
 - ❌ RespondStage extracts and sends `Record` components first → voice arrives before text
 
-These are framework-level tradeoffs. Three approaches have been evaluated and rejected:
-
-1. **`SessionServiceManager.set_tts_status_for_session()` temporary toggle** (v1.5.2): if `after_message_sent` doesn't fire (pipeline error), TTS stays permanently disabled in persistent storage.
-
-2. **Session-level TTS suppression with lease + reference count + watchdog + token exactly-once** (v2.0 exploration, 2026-07): requires a state machine incorporating persistent storage, leases, timeouts, ref counting, baseline snapshots, atomic state transitions, and crash recovery — effectively a miniature distributed-systems library implemented inside a single plugin. Complexity is indefensible for what amounts to a per-message boolean.
-
-3. **Framework-level `result.use_tts_ = False`**: the clean solution — add a per-message TTS skip flag to AstrBot. Requires upstream PR; plugin can adopt when framework ships it.
-
-**Decision:** Segmented replies are documented as mutually exclusive with this plugin. Users choose one or the other. The `GENERAL_RESULT` mechanism is stable, well-tested, and avoids the entire class of concurrency/persistence/safety-net bugs that session-state manipulation introduces.
+**Decision:** Segmented replies are documented as mutually exclusive with this plugin. Users choose one or the other.
 
 ## `on_llm_response` — result_chain fallback
 
@@ -94,11 +140,52 @@ if not text and resp.result_chain:
 ```python
 from astrbot.core.message.message_event_result import ResultContentType  # NOT in astrbot.api.all
 from astrbot.core.star.session_llm_manager import SessionServiceManager
+from astrbot.core.agent.run_context import ContextWrapper  # for FunctionTool.call()
+from astrbot.core.astr_agent_context import AstrAgentContext  # generic param for FunctionTool
+from astrbot.api import FunctionTool
 ```
+
+## Tool registration pattern (v1.7.0)
+
+```python
+from dataclasses import dataclass, field
+
+@dataclass
+class VoiceTool(FunctionTool[AstrAgentContext]):
+    plugin: Any | None = None
+    name: str = "tvls_send_voice"
+    description: str = "..."
+    parameters: dict = field(default_factory=lambda: {
+        "type": "object", "properties": {}, "required": [],
+    })
+
+    async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> str:
+        event = context.context.event  # AstrMessageEvent via agent context
+        event.set_extra("_tvls_voice_requested", True)
+        return "Voice message will be sent."
+```
+
+Register in `initialize()` via `self.context.add_llm_tools(tool_instance)`. Registration replaces existing tool with same name. Toggle `tool.active` to show/hide from LLM.
 
 ## Config schema gotcha
 
 `_conf_schema.json` types: `int`, `float`, `bool`, `string`, `text`, `list`, `file`, `object`, `template_list`. `"integer"` → `TypeError`.
+
+## Tests
+
+Three test suites, all in `tests/` (gitignored):
+
+```bash
+# Run with AstrBot venv (REAL import layer, full integration):
+& "D:\AstrBotLauncher-0.1.5.5\AstrBot\venv\Scripts\python.exe" tests/test_voice_tool.py
+
+# Standalone (no AstrBot deps needed, reference layer only):
+python tests/test_strip_thinking.py
+python tests/test_filter_text_for_tts.py
+python tests/test_voice_tool.py
+```
+
+`test_voice_tool.py` has dual layers: reference layer (standalone) + integration layer (requires AstrBot venv, uses real imports).
 
 ## Commands
 
