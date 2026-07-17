@@ -486,9 +486,7 @@ class TextVoiceLangSplit(Star):
         )
         asyncio.create_task(self._send_deferred_voice(event, pending))
 
-    async def _send_deferred_voice(
-        self, event: AstrMessageEvent, text: str
-    ) -> None:
+    async def _send_deferred_voice(self, event: AstrMessageEvent, text: str) -> None:
         tts_provider = self.context.get_using_tts_provider(event.unified_msg_origin)
         if not tts_provider:
             logger.debug(
