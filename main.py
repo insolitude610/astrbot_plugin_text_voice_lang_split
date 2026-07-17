@@ -246,8 +246,6 @@ class TextVoiceLangSplit(Star):
             result.use_t2i_ = False
             return
 
-        event.set_extra("_tvls_decorated", True)
-
         tts_provider = self.context.get_using_tts_provider(event.unified_msg_origin)
         if not tts_provider:
             logger.debug("[text_voice_lang_split] No TTS provider configured, skip")
@@ -269,6 +267,8 @@ class TextVoiceLangSplit(Star):
 
         if not plain_texts:
             return
+
+        event.set_extra("_tvls_decorated", True)
 
         full_text = "".join(comp.text for _, comp in plain_texts)
         if len(full_text.strip()) < 2:
