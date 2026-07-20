@@ -20,8 +20,8 @@ class VoiceTool(FunctionTool[AstrAgentContext]):
         " comfort, quiet sincerity.\n"
         "3. Deep & melancholic — loneliness, gentle sadness, vulnerability,"
         " wistful longing, quiet heartache.\n\n"
-        "Do NOT call this tool for replies whose tone is neutral, factual,"
-        " angry, confrontational, cold, or otherwise contrary to the three"
+        "Do NOT call this tool for replies whose tone is angry,"
+        " confrontational, cold, or otherwise contrary to the three"
         " emotional dimensions above. If you are unsure, skip this tool."
     )
     parameters: dict = field(
