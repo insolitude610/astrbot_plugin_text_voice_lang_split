@@ -12,13 +12,14 @@ class VoiceTool(FunctionTool[AstrAgentContext]):
     name: str = "tvls_send_voice"
     description: str = (
         "Send a voice message of your current reply."
-        " Call this tool when you believe the user would benefit from hearing "
-        "the response spoken aloud in the configured voice language, "
-        "such as during casual conversation, emotional support, storytelling, "
-        "greetings, or spoken-language teaching. "
-        "For content that is primarily code, lists, tables, logs, URLs, "
-        "brief confirmations, or information-dense technical data, "
-        "you may skip calling this tool to avoid unnecessary voice output."
+        " You should call this tool for nearly all replies to make the"
+        " interaction more natural and expressive — like speaking to the user"
+        " directly. You MUST call it when your reply is emotional, playful,"
+        " affectionate, teasing, or any casual conversation."
+        " Brief confirmations like \"OK\" or \"Got it\" should also be voiced."
+        " Only skip this tool when the reply is purely technical"
+        " (code debugging, technical explanations) or dominated by raw"
+        " information (lists, links, data) with no conversational element."
     )
     parameters: dict = field(
         default_factory=lambda: {
