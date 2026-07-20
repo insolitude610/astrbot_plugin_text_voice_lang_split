@@ -11,21 +11,18 @@ class VoiceTool(FunctionTool[AstrAgentContext]):
     plugin: Any | None = None
     name: str = "tvls_send_voice"
     description: str = (
-        "Send a voice message of your current reply."
-        " You should call this tool for nearly all replies to make the"
-        " interaction more natural and expressive — like speaking to the user"
-        " directly. You MUST call it when your reply carries any of these"
-        " emotional tones, where voice is essential to delivery:\n\n"
+        "Send a voice message of your current reply. You MUST call this tool"
+        " when your reply carries any of these emotional tones, where voice"
+        " is essential to delivery:\n\n"
         "1. Playful & intimate — light teasing, coquettish charm, affectionate"
         " banter, a knowing smile behind your words.\n"
         "2. Gentle & nostalgic — soft warmth, tender reminiscence, heartfelt"
         " comfort, quiet sincerity.\n"
         "3. Deep & melancholic — loneliness, gentle sadness, vulnerability,"
         " wistful longing, quiet heartache.\n\n"
-        "Brief confirmations like \"OK\" or \"Got it\" should also be voiced."
-        " Only skip this tool when the reply is purely technical"
-        " (code debugging, technical explanations) or dominated by raw"
-        " information (lists, links, data) with no conversational element."
+        "Do NOT call this tool for replies whose tone is neutral, factual,"
+        " angry, confrontational, cold, or otherwise contrary to the three"
+        " emotional dimensions above. If you are unsure, skip this tool."
     )
     parameters: dict = field(
         default_factory=lambda: {
