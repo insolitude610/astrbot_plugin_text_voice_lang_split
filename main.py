@@ -225,8 +225,10 @@ class TextVoiceLangSplit(Star):
     def _strip_thinking(text: str) -> str:
         if not text:
             return text
+        had_thinking = bool(re.search(r"<think>", text))
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-        text = re.sub(r"^.*?\s*response", "", text, flags=re.DOTALL)
+        if had_thinking:
+            text = re.sub(r"^.*?\s*response", "", text, flags=re.DOTALL)
         text = re.sub(r"</?think>", "", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
@@ -238,6 +240,9 @@ class TextVoiceLangSplit(Star):
             return
 
         if not result.is_llm_result():
+            return
+
+        if event.get_extra("action_type") == "live":
             return
 
         if event.get_extra("_tvls_decorated", False):
@@ -272,6 +277,8 @@ class TextVoiceLangSplit(Star):
 
         full_text = "".join(comp.text for _, comp in plain_texts)
         if len(full_text.strip()) < 2:
+            result.result_content_type = ResultContentType.GENERAL_RESULT
+            result.use_t2i_ = False
             return
 
         filtered_text = self._filter_text_for_tts(full_text)
@@ -491,6 +498,19 @@ class TextVoiceLangSplit(Star):
         if not tts_provider:
             logger.debug(
                 "[text_voice_lang_split] No TTS provider for deferred voice, skip"
+            )
+            return
+
+        if not await SessionServiceManager.should_process_tts_request(event):
+            logger.debug(
+                "[text_voice_lang_split] TTS disabled for session, skip deferred voice"
+            )
+            return
+
+        provider_config = self.context.get_config(event.unified_msg_origin)
+        if not provider_config.get("provider_tts_settings", {}).get("enable", False):
+            logger.debug(
+                "[text_voice_lang_split] TTS globally disabled, skip deferred voice"
             )
             return
 
