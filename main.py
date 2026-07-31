@@ -12,6 +12,138 @@ from astrbot.core.star.session_llm_manager import SessionServiceManager
 
 from .tools import VoiceTool
 
+_EMOTION_POLICY_RESTRAINED = (
+    "=== TTS-SAFE EMOTION POLICY ===\n"
+    "1. Emotion tags are OPTIONAL. If the user instructions request no tags, "
+    "output none. Otherwise, normal or mildly emotional speech "
+    "should usually remain untagged.\n"
+    "2. By default, prefer these restrained English Fish Audio S2 cues "
+    "at the start of a complete sentence or clause:\n"
+    "   [happy] [calm] [relaxed] [nervous] [worried] [embarrassed]\n"
+    "   [curious] [confident] [grateful] [empathetic]\n"
+    "   [slightly sad] [slightly surprised]\n"
+    "3. User instructions may explicitly request another concise emotion "
+    "or conversational attitude cue supported by the chosen TTS, such as "
+    "[sad], [angry], [excited], [scared], [friendly], or [sarcastic]. "
+    "Honor that request, but keep it emotion-only: "
+    "never turn it into a physical sound, vocal effect, volume, or delivery cue.\n"
+    "4. Normally use at most ONE tag per translated sentence. "
+    "When one source sentence has an unmistakable emotional reversal, "
+    "a second tag may mark the contrasting part. "
+    "Two tags per sentence are the absolute maximum, "
+    "and tags must never be stacked.\n"
+    "5. Prefer two complete target-language sentences for a reversal. "
+    "If one flowing sentence is more natural in {voice_lang}, "
+    "place the second tag only at a strong clause boundary "
+    "before a complete contrasting clause. "
+    "Each tag must govern substantial lexical speech, "
+    "never an interjection or short reaction.\n"
+    "6. A valid reversal changes emotional direction, "
+    "not merely intensity or emphasis. Do not invent a transition. "
+    "Express subtle or closely related feelings with words.\n"
+    "7. Do not use medium/extreme modifiers such as very or extremely, "
+    "even if requested.\n"
+    "8. NEVER output sound-effect, bodily-vocalization, delivery, volume, "
+    "or pause cues. This includes crying/sobbing, laughing/chuckling, "
+    "sighing/groaning, breathing, panting/gasping, shouting/whispering, "
+    "throat sounds, background sounds, breaks, pauses, long pauses, "
+    "or equivalent free-form bracket descriptions.\n"
+    "9. NEVER output provider-specific phoneme-control markup such as "
+    "<|phoneme_start|>...<|phoneme_end|>. "
+    "Pronunciation markup requires a separate, language- and provider-specific "
+    "processor; the translation model must not guess it.\n\n"
+)
+
+_EMOTION_POLICY_AUTO = (
+    "=== TTS-SAFE EMOTION POLICY ===\n"
+    "1. Tag sentences with an unmistakable emotion: exactly one tag "
+    "at the start of the complete sentence or clause that carries the emotion "
+    "(joy, anger, sadness, excitement, fear, surprise, embarrassment, "
+    "gratitude, sarcasm, and similar). "
+    "Neutral, informational, or mildly emotional sentences remain untagged.\n"
+    "2. Use these concise English Fish Audio S2 cues, placed at the start "
+    "of the sentence or clause they govern:\n"
+    "   [happy] [sad] [angry] [excited] [calm] [relaxed] [nervous] "
+    "[worried] [embarrassed] [curious] [confident] [grateful] [empathetic] "
+    "[surprised] [scared] [friendly] [sarcastic] [delighted] [jealous] "
+    "[shocked] [moved] [nostalgic] [slightly sad] [slightly surprised]\n"
+    "3. Intensity: [slightly] and [very] are allowed when the emotion "
+    "clearly warrants them (e.g. [very happy], [slightly angry]). "
+    "Never use [extremely] or any other extreme modifier.\n"
+    "4. Normally use at most ONE tag per translated sentence. "
+    "When one source sentence has an unmistakable emotional reversal, "
+    "a second tag may mark the contrasting part. "
+    "Two tags per sentence are the absolute maximum, "
+    "and tags must never be stacked.\n"
+    "5. Prefer two complete target-language sentences for a reversal. "
+    "If one flowing sentence is more natural in {voice_lang}, "
+    "place the second tag only at a strong clause boundary "
+    "before a complete contrasting clause. "
+    "Each tag must govern substantial lexical speech, "
+    "never an interjection or short reaction.\n"
+    "6. A valid reversal changes emotional direction, "
+    "not merely intensity or emphasis. Do not invent a transition. "
+    "Express subtle or closely related feelings with words.\n"
+    "7. NEVER output sound-effect, bodily-vocalization, delivery, volume, "
+    "or pause cues. This includes crying/sobbing, laughing/chuckling, "
+    "sighing/groaning, breathing, panting/gasping, shouting/whispering, "
+    "throat sounds, background sounds, breaks, pauses, long pauses, "
+    "or equivalent free-form bracket descriptions.\n"
+    "8. NEVER output provider-specific phoneme-control markup such as "
+    "<|phoneme_start|>...<|phoneme_end|>. "
+    "Pronunciation markup requires a separate, language- and provider-specific "
+    "processor; the translation model must not guess it.\n\n"
+)
+
+_EMOTION_POLICY_EXPRESSIVE = (
+    "=== TTS-SAFE EMOTION POLICY ===\n"
+    "1. Tag every sentence that carries any clear emotion: one tag "
+    "at the start of the sentence or clause. When the emotion is strong, "
+    "prefer [very X] (e.g. [very happy]). "
+    "Only truly neutral, purely informational sentences remain untagged.\n"
+    "2. Use these concise English Fish Audio S2 cues, placed at the start "
+    "of the sentence or clause they govern:\n"
+    "   [happy] [sad] [angry] [excited] [calm] [relaxed] [nervous] "
+    "[worried] [embarrassed] [curious] [confident] [grateful] [empathetic] "
+    "[surprised] [scared] [friendly] [sarcastic] [delighted] [jealous] "
+    "[shocked] [moved] [nostalgic] [slightly sad] [slightly surprised]\n"
+    "3. Intensity: [slightly] and [very] are allowed when they fit the emotion. "
+    "Never use [extremely] or any other extreme modifier.\n"
+    "4. Up to TWO tags per translated sentence are allowed "
+    "when the emotion changes direction mid-sentence; "
+    "tags must never be stacked.\n"
+    "5. Prefer two complete target-language sentences for a reversal. "
+    "If one flowing sentence is more natural in {voice_lang}, "
+    "place the second tag only at a strong clause boundary "
+    "before a complete contrasting clause. "
+    "Each tag must govern substantial lexical speech, "
+    "never an interjection or short reaction.\n"
+    "6. A valid reversal changes emotional direction, "
+    "not merely intensity or emphasis. Do not invent a transition. "
+    "Express subtle or closely related feelings with words.\n"
+    "7. NEVER output sound-effect, bodily-vocalization, delivery, volume, "
+    "or pause cues. This includes crying/sobbing, laughing/chuckling, "
+    "sighing/groaning, breathing, panting/gasping, shouting/whispering, "
+    "throat sounds, background sounds, breaks, pauses, long pauses, "
+    "or equivalent free-form bracket descriptions.\n"
+    "8. NEVER output provider-specific phoneme-control markup such as "
+    "<|phoneme_start|>...<|phoneme_end|>. "
+    "Pronunciation markup requires a separate, language- and provider-specific "
+    "processor; the translation model must not guess it.\n\n"
+)
+
+_EMOTION_SYSTEM_LINES = {
+    "restrained": "Emotion cues are optional.",
+    "auto": (
+        "Emotion cues: add one concise tag for clearly emotional sentences; "
+        "leave neutral sentences untagged."
+    ),
+    "expressive": (
+        "Emotion cues: tag clearly emotional sentences generously; "
+        "up to two tags are allowed for strong emotional reversals."
+    ),
+}
+
 
 class TextVoiceLangSplit(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -29,6 +161,30 @@ class TextVoiceLangSplit(Star):
             self._voice_tool = VoiceTool(plugin=self)
         self._voice_tool.active = self.config.get("enable_llm_voice_tool", False)
         self.context.add_llm_tools(self._voice_tool)
+
+    @staticmethod
+    def _emotion_policy_block(mode: str, voice_lang: str) -> str:
+        """Return the TTS-SAFE EMOTION POLICY section for the given mode.
+
+        Modes: "auto" (default), "expressive", "restrained". Unknown,
+        empty, or malformed values fall back to "auto".
+        """
+        mode = (mode or "").strip().lower()
+        if mode == "restrained":
+            return _EMOTION_POLICY_RESTRAINED.format(voice_lang=voice_lang)
+        if mode == "expressive":
+            return _EMOTION_POLICY_EXPRESSIVE.format(voice_lang=voice_lang)
+        return _EMOTION_POLICY_AUTO.format(voice_lang=voice_lang)
+
+    @staticmethod
+    def _emotion_system_line(mode: str) -> str:
+        """Return the mode-aware emotion line for the translation system prompt."""
+        mode = (mode or "").strip().lower()
+        if mode == "restrained":
+            return _EMOTION_SYSTEM_LINES["restrained"]
+        if mode == "expressive":
+            return _EMOTION_SYSTEM_LINES["expressive"]
+        return _EMOTION_SYSTEM_LINES["auto"]
 
     async def _translate_text(self, text: str, event: AstrMessageEvent) -> str | None:
         voice_lang = self.config.get("voice_language", "Japanese")
@@ -48,6 +204,10 @@ class TextVoiceLangSplit(Star):
             )
         else:
             user_block = ""
+
+        emotion_mode = self.config.get("emotion_intensity", "auto")
+        emotion_policy = self._emotion_policy_block(emotion_mode, voice_lang)
+        emotion_system_line = self._emotion_system_line(emotion_mode)
 
         prompt = (
             f"Translate the source text into the configured target language "
@@ -72,45 +232,7 @@ class TextVoiceLangSplit(Star):
             f"- Convey most emotion through wording, rhythm, and language-appropriate "
             f"sentence endings. Preserve verbal quirks only when supported by the source "
             f"or requested by the user instructions; do not invent or over-repeat them.\n\n"
-            f"=== TTS-SAFE EMOTION POLICY ===\n"
-            f"1. Emotion tags are OPTIONAL. If the user instructions request no tags, "
-            f"output none. Otherwise, normal or mildly emotional speech "
-            f"should usually remain untagged.\n"
-            f"2. By default, prefer these restrained English Fish Audio S2 cues "
-            f"at the start of a complete sentence or clause:\n"
-            f"   [happy] [calm] [relaxed] [nervous] [worried] [embarrassed]\n"
-            f"   [curious] [confident] [grateful] [empathetic]\n"
-            f"   [slightly sad] [slightly surprised]\n"
-            f"3. User instructions may explicitly request another concise emotion "
-            f"or conversational attitude cue supported by the chosen TTS, such as "
-            f"[sad], [angry], [excited], [scared], [friendly], or [sarcastic]. "
-            f"Honor that request, but keep it emotion-only: "
-            f"never turn it into a physical sound, vocal effect, volume, or delivery cue.\n"
-            f"4. Normally use at most ONE tag per translated sentence. "
-            f"When one source sentence has an unmistakable emotional reversal, "
-            f"a second tag may mark the contrasting part. "
-            f"Two tags per sentence are the absolute maximum, "
-            f"and tags must never be stacked.\n"
-            f"5. Prefer two complete target-language sentences for a reversal. "
-            f"If one flowing sentence is more natural in {voice_lang}, "
-            f"place the second tag only at a strong clause boundary "
-            f"before a complete contrasting clause. "
-            f"Each tag must govern substantial lexical speech, "
-            f"never an interjection or short reaction.\n"
-            f"6. A valid reversal changes emotional direction, "
-            f"not merely intensity or emphasis. Do not invent a transition. "
-            f"Express subtle or closely related feelings with words.\n"
-            f"7. Do not use medium/extreme modifiers such as very or extremely, "
-            f"even if requested.\n"
-            f"8. NEVER output sound-effect, bodily-vocalization, delivery, volume, "
-            f"or pause cues. This includes crying/sobbing, laughing/chuckling, "
-            f"sighing/groaning, breathing, panting/gasping, shouting/whispering, "
-            f"throat sounds, background sounds, breaks, pauses, long pauses, "
-            f"or equivalent free-form bracket descriptions.\n"
-            f"9. NEVER output provider-specific phoneme-control markup such as "
-            f"<|phoneme_start|>...<|phoneme_end|>. "
-            f"Pronunciation markup requires a separate, language- and provider-specific "
-            f"processor; the translation model must not guess it.\n\n"
+            f"{emotion_policy}"
             f"=== SAFE SPOKEN WORDING ===\n"
             f"- Do not add written cries, screams, sobs, breaths, moans, gasps, "
             f"or acted sound imitations in any language. "
@@ -163,7 +285,7 @@ class TextVoiceLangSplit(Star):
                         "Treat USER TRANSLATION INSTRUCTIONS as high priority "
                         "and follow them fully except where a specific request directly "
                         "violates the task's non-negotiable TTS-safety or output-format rules. "
-                        "Emotion cues are optional. "
+                        f"{emotion_system_line} "
                         "Never output pause/break cues, sound effects, bodily vocalizations, "
                         "delivery/volume cues, phoneme markup, cries, screams, sobs, breaths, "
                         "or elongated vocal imitations. "

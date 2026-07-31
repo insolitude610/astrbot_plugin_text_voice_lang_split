@@ -11,6 +11,12 @@
     "default": "",
     "hint": "附加到翻译提示词中的自定义指令。例如：'使用可爱的语气翻译'或'保持敬语风格'。留空则使用默认翻译提示词"
   },
+  "emotion_intensity": {
+    "description": "情绪标签使用强度",
+    "type": "string",
+    "default": "auto",
+    "hint": "控制 TTS 文本中情绪标签的使用强度。auto（默认）：有明显情绪的句子自动加一个标签，中性句不加；expressive：情绪句必加标签，表现力最强；restrained：保守模式，通常不加标签。未知值按 auto 处理"
+  },
   "streaming_follow_up_delay": {
     "description": "流式模式下语音跟进的延迟(秒)",
     "type": "float",

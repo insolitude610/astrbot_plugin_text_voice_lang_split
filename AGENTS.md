@@ -114,7 +114,7 @@ v1.5.2 attempted to replace this with chain inspection and was immediately rever
 
 ## Emotion tags — English only
 
-FishAudio S2 uses natural-language `[bracket]` cues. English words are recognized; Japanese words (`[嬉しい]`) are spoken as text. A curated list of 28 preferred tags is embedded in the translation prompt, plus intensity modifiers (`[slightly]`, `[very]`, `[extremely]`).
+FishAudio S2 uses natural-language `[bracket]` cues. English words are recognized; Japanese words (`[嬉しい]`) are spoken as text. Since v1.8.0 the prompt's `=== TTS-SAFE EMOTION POLICY ===` section is generated per mode by `_emotion_policy_block(mode, voice_lang)` (module constants `_EMOTION_POLICY_AUTO/_EXPRESSIVE/_RESTRAINED`): `auto` (default) and `expressive` embed a 24-tag basic-emotion list with `[slightly]`/`[very]` intensity (never `[extremely]`); `restrained` is byte-identical to the v1.6.0 conservative text (12 restrained tags, strong tags only on explicit user request, no very/extremely). Unknown/empty config values fall back to `auto`. Safety bans (sound effects, bodily vocalization, phoneme markup, stacking, >2 tags/sentence) are identical across modes — they are what prevent audio collapse. `translate_instructions` remains HIGH PRIORITY and can override tag policy. The system-prompt emotion line comes from `_emotion_system_line(mode)`.
 
 ## `GENERAL_RESULT` side effects
 

@@ -44,6 +44,7 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 |--------|--------|------|
 | `voice_language` | `日语` | 语音目标语言，支持模型能处理的任意语言 |
 | `translate_instructions` | (空) | 自定义翻译指令，如"使用可爱的语气翻译"。填写后会追加到默认 prompt 后 |
+| `emotion_intensity` | `auto` | 情绪标签使用强度：`auto`（默认，有明显情绪的句子自动加一个标签，中性句不加）；`expressive`（情绪句必加标签，表现力最强）；`restrained`（保守模式，通常不加标签）。未知值按 `auto` 处理 |
 | `translate_provider` | (空) | 翻译用 LLM Provider，留空则复用当前聊天的 Provider |
 | `translate_timeout` | `30` | 翻译请求超时(秒)，超时后自动重试一次（间隔 0.5s），设为 0 关闭超时 |
 | `tts_max_chars` | `0` | 过滤后的文本超过此字符数时跳过翻译和 TTS。设为 0 不限制 |

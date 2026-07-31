@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.8.0
+
+- **新增 `emotion_intensity` 配置项**：控制 TTS 文本中情绪标签的使用强度，三档可选：
+  - `auto`（新默认）：有明显情绪的句子自动加**恰好一个**标签，中性句不加。默认标签列表从 12 个克制标签扩展为 FishAudio S2 完整基础情绪集（24 个，新增 `[sad]` `[angry]` `[excited]` `[scared]` `[surprised]` `[friendly]` `[sarcastic]` `[delighted]` `[jealous]` `[shocked]` `[moved]` `[nostalgic]` 等），恢复 `[slightly]`/`[very]` 强度修饰（仍禁用 `[extremely]`）
+  - `expressive`：情绪句必加标签，允许情感反转双标签，表现力最强
+  - `restrained`：保持 v1.6.0 的保守策略（标签可选、通常不加、强情绪标签仅按用户指令使用）
+- **翻译提示词按模式动态生成**：`=== TTS-SAFE EMOTION POLICY ===` 板块由 `_emotion_policy_block()` 按配置模式构建，未知/空值回退 `auto`；system prompt 的情绪指引行同样随模式切换
+- **安全禁令三模式一致保留**：禁音效/身体发声/音量/停顿/phoneme 标记、禁标签堆叠、单句最多 2 个标签、标签必须管住实质词汇（防止 TTS 音频坍缩/爆音的既有防护不变）
+- `translate_instructions` 仍是高优先级，可覆盖标签策略（包括要求完全不加标签）
+- 修复 `emotion_intensity` 未知值导致回退 `auto` 的兜底逻辑；新增 `tests/test_translation_prompt.py`（14 项，含"restrained 与 v1.6.0 提示词字节级一致"回归测试）
+
 ## v1.7.0
 
 - **新增 LLM 自主判断语音开关**：新增 `enable_llm_voice_tool` 配置项，开启后插件注册 `tvls_send_voice` 函数工具，由 LLM 自行判断当前回复是否需要发送语音。适用于需要对话语境感知的场景，如闲聊时发语音、代码/列表时跳过。关闭时保持默认行为（每条消息都生成语音）
