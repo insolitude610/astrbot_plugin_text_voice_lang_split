@@ -23,6 +23,13 @@ class TextVoiceLangSplit(Star):
         self._filter_patterns = text_utils.compile_filter_patterns(
             config.get("remove_patterns", [])
         )
+        concurrency = int(config.get("tts_concurrency", 2))
+        self._tts_semaphore = (
+            asyncio.Semaphore(concurrency) if concurrency > 0 else None
+        )
+        self._bg_tasks: set[asyncio.Task] = set()
+        self._terminated: bool = False
+        self._temp_manager = voice_utils.TempFileManager()
 
     async def initialize(self):
         logger.info("[text_voice_lang_split] Plugin initialized")
@@ -115,36 +122,37 @@ class TextVoiceLangSplit(Star):
 
         logger.info(f"[text_voice_lang_split] Translating: '{full_text[:50]}...'")
 
-        translated = await translate.translate_text(
-            self.context, self.config, filtered_text, event
-        )
-        if not translated:
-            self._streaming_texts.pop(self._get_session_key(event), None)
-            result.result_content_type = ResultContentType.GENERAL_RESULT
-            result.use_t2i_ = False
-            logger.info("[text_voice_lang_split] Translation failed, text only")
-            return
+        async with voice_utils.voice_slot(self._tts_semaphore):
+            translated = await translate.translate_text(
+                self.context, self.config, filtered_text, event
+            )
+            if not translated:
+                self._streaming_texts.pop(self._get_session_key(event), None)
+                result.result_content_type = ResultContentType.GENERAL_RESULT
+                result.use_t2i_ = False
+                logger.info("[text_voice_lang_split] Translation failed, text only")
+                return
 
-        try:
-            audio_path = await tts_provider.get_audio(translated)
-            if not audio_path:
+            try:
+                audio_path = await tts_provider.get_audio(translated)
+                if not audio_path:
+                    logger.error(
+                        "[text_voice_lang_split] TTS returned empty path, skipping"
+                    )
+                    result.result_content_type = ResultContentType.GENERAL_RESULT
+                    result.use_t2i_ = False
+                    self._streaming_texts.pop(self._get_session_key(event), None)
+                    return
+                event.track_temporary_local_file(audio_path)
+            except Exception:
                 logger.error(
-                    "[text_voice_lang_split] TTS returned empty path, skipping"
+                    "[text_voice_lang_split] TTS generation failed, keeping original",
+                    exc_info=True,
                 )
                 result.result_content_type = ResultContentType.GENERAL_RESULT
                 result.use_t2i_ = False
                 self._streaming_texts.pop(self._get_session_key(event), None)
                 return
-            event.track_temporary_local_file(audio_path)
-        except Exception:
-            logger.error(
-                "[text_voice_lang_split] TTS generation failed, keeping original",
-                exc_info=True,
-            )
-            result.result_content_type = ResultContentType.GENERAL_RESULT
-            result.use_t2i_ = False
-            self._streaming_texts.pop(self._get_session_key(event), None)
-            return
 
         result.chain.append(Record(file=audio_path, url=audio_path, text=translated))
         result.result_content_type = ResultContentType.GENERAL_RESULT
@@ -170,6 +178,7 @@ class TextVoiceLangSplit(Star):
                     event.unified_msg_origin,
                     self._streaming_texts,
                     self._filter_patterns,
+                    self._tts_semaphore,
                 )
 
         event.send_streaming = _patched
@@ -202,9 +211,28 @@ class TextVoiceLangSplit(Star):
             "[text_voice_lang_split] Deferred voice triggered "
             f"(pending text: '{pending[:50]}...')"
         )
-        asyncio.create_task(
-            voice_utils.send_deferred_voice(self.context, self.config, event, pending)
+        self._spawn_voice_task(
+            voice_utils.send_deferred_voice(
+                self.context,
+                self.config,
+                event,
+                pending,
+                self._tts_semaphore,
+                self._temp_manager,
+            )
         )
+
+    def _spawn_voice_task(self, coro) -> asyncio.Task | None:
+        """Register a background voice task; refuse after termination begins."""
+        if self._terminated:
+            logger.debug(
+                "[text_voice_lang_split] Plugin terminating, refuse to spawn voice task"
+            )
+            return None
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
 
     @filter.after_message_sent(priority=999)
     async def after_message_sent(self, event: AstrMessageEvent):
@@ -217,4 +245,12 @@ class TextVoiceLangSplit(Star):
 
     async def terminate(self):
         logger.info("[text_voice_lang_split] Plugin terminated")
+        self._terminated = True
+        tasks = list(self._bg_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.wait(tasks, timeout=5.0)
+        self._bg_tasks.clear()
+        self._temp_manager.cleanup_all()
         self._streaming_texts.clear()

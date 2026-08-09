@@ -5,6 +5,8 @@ functions with explicit dependency injection (context, config, event).
 """
 
 import asyncio
+import os
+from contextlib import asynccontextmanager
 
 from astrbot.api import logger
 from astrbot.api.event import MessageChain
@@ -14,8 +16,57 @@ from astrbot.core.star.session_llm_manager import SessionServiceManager
 from . import text_utils, translate
 
 
+class TempFileManager:
+    """Plugin-owned temporary audio files (independent of the event lifecycle).
+
+    Background sends (deferred voice) cannot rely on
+    event.track_temporary_local_file: the pipeline-end cleanup may run before
+    the task finishes, either leaking the file (tracked after cleanup) or
+    deleting it before send. The plugin tracks and deletes its own files;
+    terminate() calls cleanup_all() as a safety net.
+    """
+
+    def __init__(self):
+        self._files: set[str] = set()
+
+    def track(self, path: str) -> None:
+        self._files.add(path)
+
+    def release(self, path: str) -> None:
+        if not path:
+            return
+        self._files.discard(path)
+        try:
+            os.remove(path)
+        except OSError:
+            logger.debug(f"[text_voice_lang_split] Temp file already gone: {path}")
+
+    def cleanup_all(self) -> None:
+        for path in list(self._files):
+            self.release(path)
+
+    def tracked(self) -> set:
+        return set(self._files)
+
+
+@asynccontextmanager
+async def voice_slot(semaphore):
+    """Bound the translate+TTS critical section; None means unlimited."""
+    if semaphore is None:
+        yield
+        return
+    async with semaphore:
+        yield
+
+
 async def send_streaming_follow_up(
-    context, config, event, session_key: str, streaming_texts: dict, filter_patterns
+    context,
+    config,
+    event,
+    session_key: str,
+    streaming_texts: dict,
+    filter_patterns,
+    semaphore,
 ) -> None:
     """Translate + TTS the accumulated streaming text and send as follow-up.
 
@@ -79,25 +130,30 @@ async def send_streaming_follow_up(
         f"[text_voice_lang_split] Streaming: translating '{accumulated[:50]}...'"
     )
 
-    translated = await translate.translate_text(context, config, filtered_text, event)
-    if not translated:
-        logger.info("[text_voice_lang_split] Streaming translation failed, text only")
-        return
-
-    try:
-        audio_path = await tts_provider.get_audio(translated)
-        if not audio_path:
-            logger.error(
-                "[text_voice_lang_split] Streaming TTS returned empty path, skipping"
+    async with voice_slot(semaphore):
+        translated = await translate.translate_text(
+            context, config, filtered_text, event
+        )
+        if not translated:
+            logger.info(
+                "[text_voice_lang_split] Streaming translation failed, text only"
             )
             return
-        event.track_temporary_local_file(audio_path)
-    except Exception:
-        logger.error(
-            "[text_voice_lang_split] Streaming TTS generation failed",
-            exc_info=True,
-        )
-        return
+
+        try:
+            audio_path = await tts_provider.get_audio(translated)
+            if not audio_path:
+                logger.error(
+                    "[text_voice_lang_split] Streaming TTS returned empty path, skipping"
+                )
+                return
+            event.track_temporary_local_file(audio_path)
+        except Exception:
+            logger.error(
+                "[text_voice_lang_split] Streaming TTS generation failed",
+                exc_info=True,
+            )
+            return
 
     delay = config.get("streaming_follow_up_delay", 1.5)
     await asyncio.sleep(delay)
@@ -116,12 +172,15 @@ async def send_streaming_follow_up(
     logger.info("[text_voice_lang_split] Streaming voice sent as follow-up")
 
 
-async def send_deferred_voice(context, config, event, text: str) -> None:
+async def send_deferred_voice(
+    context, config, event, text: str, semaphore, temp_manager: TempFileManager
+) -> None:
     """Translate + TTS + send a deferred voice message as an independent follow-up.
 
     Spawned via asyncio.create_task from `_maybe_send_deferred_voice`. Runs
-    concurrently with the rest of the pipeline — this is the racy path for
-    event-tracked temp files (Phase 2 switches it to a plugin-owned manager).
+    concurrently with the rest of the pipeline — it must NOT rely on
+    event.track_temporary_local_file (pipeline-end cleanup races with it);
+    temp files are tracked via `temp_manager` and released after send.
     """
     tts_provider = context.get_using_tts_provider(event.unified_msg_origin)
     if not tts_provider:
@@ -141,25 +200,26 @@ async def send_deferred_voice(context, config, event, text: str) -> None:
         )
         return
 
-    translated = await translate.translate_text(context, config, text, event)
-    if not translated:
-        logger.info("[text_voice_lang_split] Deferred voice translation failed")
-        return
+    async with voice_slot(semaphore):
+        translated = await translate.translate_text(context, config, text, event)
+        if not translated:
+            logger.info("[text_voice_lang_split] Deferred voice translation failed")
+            return
 
-    try:
-        audio_path = await tts_provider.get_audio(translated)
-        if not audio_path:
+        try:
+            audio_path = await tts_provider.get_audio(translated)
+            if not audio_path:
+                logger.error(
+                    "[text_voice_lang_split] Deferred voice TTS returned empty path"
+                )
+                return
+            temp_manager.track(audio_path)
+        except Exception:
             logger.error(
-                "[text_voice_lang_split] Deferred voice TTS returned empty path"
+                "[text_voice_lang_split] Deferred voice TTS generation failed",
+                exc_info=True,
             )
             return
-        event.track_temporary_local_file(audio_path)
-    except Exception:
-        logger.error(
-            "[text_voice_lang_split] Deferred voice TTS generation failed",
-            exc_info=True,
-        )
-        return
 
     chain = MessageChain()
     chain.chain = [Record(file=audio_path, url=audio_path, text=translated)]
@@ -170,6 +230,7 @@ async def send_deferred_voice(context, config, event, text: str) -> None:
             "[text_voice_lang_split] Failed to send deferred voice",
             exc_info=True,
         )
-        return
-
-    logger.info("[text_voice_lang_split] Deferred voice sent as follow-up")
+    else:
+        logger.info("[text_voice_lang_split] Deferred voice sent as follow-up")
+    finally:
+        temp_manager.release(audio_path)

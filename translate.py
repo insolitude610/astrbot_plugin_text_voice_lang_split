@@ -11,6 +11,13 @@ from astrbot.api import logger
 
 from . import prompts, text_utils
 
+TRANSLATION_ERRORS = 0
+
+
+def _count_translation_error() -> None:
+    global TRANSLATION_ERRORS
+    TRANSLATION_ERRORS += 1
+
 
 async def translate_text(context, config, text, event) -> str | None:
     """Translate `text` to the configured voice language via the LLM.
@@ -57,7 +64,11 @@ async def translate_text(context, config, text, event) -> str | None:
             else:
                 llm_resp = await coro
             raw = llm_resp.completion_text.strip()
-            return text_utils.strip_thinking(raw) or None
+            translated = text_utils.strip_thinking(raw)
+            if not translated:
+                _count_translation_error()
+                return None
+            return translated
         except asyncio.TimeoutError:
             if attempt < 1:
                 logger.info(
@@ -66,12 +77,14 @@ async def translate_text(context, config, text, event) -> str | None:
                 )
                 await asyncio.sleep(0.5)
                 continue
+            _count_translation_error()
             logger.warning(
                 f"[text_voice_lang_split] Translation timed out after {timeout}s "
                 f"(retries exhausted), falling back"
             )
             return None
         except Exception:
+            _count_translation_error()
             logger.warning(
                 "[text_voice_lang_split] Translation failed, falling back",
                 exc_info=True,

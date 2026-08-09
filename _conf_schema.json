@@ -42,6 +42,12 @@
     "default": 0,
     "hint": "过滤后的文本超过此字符数时跳过翻译和 TTS 生成，仅发送文字。设为 0 表示不限制"
   },
+  "tts_concurrency": {
+    "description": "并发翻译与语音合成上限",
+    "type": "int",
+    "default": 2,
+    "hint": "同时进行的翻译+语音合成任务数上限，防止多会话并发打爆 Provider API 配额。设为 0 表示不限制"
+  },
   "enable_llm_voice_tool": {
     "description": "LLM 自主判断是否发送语音",
     "type": "bool",

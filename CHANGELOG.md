@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.9.1
+
+- **修复插件卸载/重载时不取消后台语音任务**：新增 `_bg_tasks` 任务注册表，所有后台延迟语音任务经 `_spawn_voice_task()` 统一创建；`terminate()` 现在取消所有 in-flight 任务（5 秒超时等待）、清理残留临时文件并清空状态。配置变更/插件重载时不再有"旧实例任务继续运行"的隐患
+- **修复延迟语音临时文件清理竞态**：`_send_deferred_voice` 是 fire-and-forget 后台任务，原先依赖 `event.track_temporary_local_file`——管线结束时的 `cleanup_temporary_local_files()` 可能先于任务执行，导致音频文件泄漏（track 晚于 cleanup）或发送失败（cleanup 在 track 与 send 之间）。新增插件自有 `TempFileManager`（track/release/cleanup_all），延迟语音路径改为任务内跟踪、发送后 finally 释放、terminate 兜底清理；`release` 容忍文件已不存在。非流式与流式路径保持 event 跟踪（已核实安全）
+- **新增 `tts_concurrency` 配置项**（int，默认 2，0=不限流）：全局 `asyncio.Semaphore` 限制三条语音路径（非流式/流式补发/延迟语音）的"翻译+语音合成"并发数，防止多会话并发打爆 Provider API 配额（如 Live Chat 429）。配置变更自动重载重建
+- **翻译失败可见性**：`translate.py` 新增模块级 `TRANSLATION_ERRORS` 错误计数器，每次翻译失败（超时耗尽/异常/空输出）+1，便于排查；保留原有 exc_info 日志，不打扰用户
+- 新增 `tests/test_phase2.py`（12 项：临时文件生命周期/信号量限流/任务取消/错误计数/配置接线）与 `tests/test_smoke.py`（5 项：三条语音路径端到端冒烟）
+
 ## v1.9.0
 
 - **纯结构重构：拆分 680 行 main.py 为四个职责单一模块**，行为零变化：
