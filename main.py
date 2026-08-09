@@ -9,7 +9,7 @@ from astrbot.core.message.message_event_result import ResultContentType
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.star.session_llm_manager import SessionServiceManager
 
-from . import text_utils, translate, voice_utils
+from . import text_utils, voice_utils
 from .tools import VoiceTool
 
 
@@ -48,11 +48,15 @@ class TextVoiceLangSplit(Star):
         if not result.is_llm_result():
             return
 
+        if not await voice_utils.is_tvls_enabled(event):
+            logger.debug("[text_voice_lang_split] Voice disabled for session, skip")
+            return
+
         if event.get_extra("action_type") == "live":
             return
 
         if event.get_extra("_tvls_decorated", False):
-            self._maybe_send_deferred_voice(event)
+            await self._maybe_send_deferred_voice(event)
             result.result_content_type = ResultContentType.GENERAL_RESULT
             result.use_t2i_ = False
             return
@@ -122,39 +126,25 @@ class TextVoiceLangSplit(Star):
 
         logger.info(f"[text_voice_lang_split] Translating: '{full_text[:50]}...'")
 
-        async with voice_utils.voice_slot(self._tts_semaphore):
-            translated = await translate.translate_text(
-                self.context, self.config, filtered_text, event
-            )
-            if not translated:
-                self._streaming_texts.pop(self._get_session_key(event), None)
-                result.result_content_type = ResultContentType.GENERAL_RESULT
-                result.use_t2i_ = False
-                logger.info("[text_voice_lang_split] Translation failed, text only")
-                return
+        voice = await voice_utils.produce_voice_paths(
+            self.context,
+            self.config,
+            event,
+            filtered_text,
+            tts_provider,
+            self._tts_semaphore,
+        )
+        if voice is None:
+            self._streaming_texts.pop(self._get_session_key(event), None)
+            result.result_content_type = ResultContentType.GENERAL_RESULT
+            result.use_t2i_ = False
+            logger.info("[text_voice_lang_split] Translation failed, text only")
+            return
 
-            try:
-                audio_path = await tts_provider.get_audio(translated)
-                if not audio_path:
-                    logger.error(
-                        "[text_voice_lang_split] TTS returned empty path, skipping"
-                    )
-                    result.result_content_type = ResultContentType.GENERAL_RESULT
-                    result.use_t2i_ = False
-                    self._streaming_texts.pop(self._get_session_key(event), None)
-                    return
-                event.track_temporary_local_file(audio_path)
-            except Exception:
-                logger.error(
-                    "[text_voice_lang_split] TTS generation failed, keeping original",
-                    exc_info=True,
-                )
-                result.result_content_type = ResultContentType.GENERAL_RESULT
-                result.use_t2i_ = False
-                self._streaming_texts.pop(self._get_session_key(event), None)
-                return
-
-        result.chain.append(Record(file=audio_path, url=audio_path, text=translated))
+        for path, _ in voice:
+            event.track_temporary_local_file(path)
+        for path, chunk_text in voice:
+            result.chain.append(Record(file=path, url=path, text=chunk_text))
         result.result_content_type = ResultContentType.GENERAL_RESULT
         result.use_t2i_ = False
         self._streaming_texts.pop(self._get_session_key(event), None)
@@ -195,8 +185,30 @@ class TextVoiceLangSplit(Star):
         session_key = self._get_session_key(event)
         self._streaming_texts[session_key] = text
 
-    def _maybe_send_deferred_voice(self, event: AstrMessageEvent) -> None:
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command(
+        "tvls", alias={"语音开关"}, desc="切换本会话的文本-语音分离语音（管理员）"
+    )
+    async def tvls_command(self, event: AstrMessageEvent, action: str = "status"):
+        cmd = (action or "status").strip().lower()
+        if cmd in ("on", "enable", "开"):
+            if not await voice_utils.set_tvls_enabled(event, True):
+                return event.plain_result("语音开关写入失败，请检查日志。")
+            return event.plain_result("本会话文本-语音分离语音已开启。")
+        if cmd in ("off", "disable", "关"):
+            if not await voice_utils.set_tvls_enabled(event, False):
+                return event.plain_result("语音开关写入失败，请检查日志。")
+            return event.plain_result("本会话文本-语音分离语音已关闭。")
+        enabled = await voice_utils.is_tvls_enabled(event)
+        return event.plain_result(
+            f"本会话文本-语音分离语音状态：{'开启' if enabled else '关闭'}\n"
+            f"用法：/tvls on|off（管理员）"
+        )
+
+    async def _maybe_send_deferred_voice(self, event: AstrMessageEvent) -> None:
         if not self.config.get("enable_llm_voice_tool", False):
+            return
+        if not await voice_utils.is_tvls_enabled(event):
             return
         if not event.get_extra("_tvls_voice_requested", False):
             return
@@ -238,7 +250,7 @@ class TextVoiceLangSplit(Star):
     async def after_message_sent(self, event: AstrMessageEvent):
         session_key = self._get_session_key(event)
         self._streaming_texts.pop(session_key, None)
-        self._maybe_send_deferred_voice(event)
+        await self._maybe_send_deferred_voice(event)
 
     def _get_session_key(self, event: AstrMessageEvent) -> str:
         return event.unified_msg_origin

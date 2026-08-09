@@ -8,12 +8,49 @@ import asyncio
 import os
 from contextlib import asynccontextmanager
 
-from astrbot.api import logger
+from astrbot.api import logger, sp
 from astrbot.api.event import MessageChain
 from astrbot.core.message.components import Record
 from astrbot.core.star.session_llm_manager import SessionServiceManager
 
 from . import text_utils, translate
+
+TVLS_ENABLED_KEY = "tvls_enabled"
+
+
+async def is_tvls_enabled(event) -> bool:
+    """Per-session voice toggle (default enabled, fail-open on DB errors)."""
+    try:
+        value = await sp.get_async(
+            scope="umo",
+            scope_id=event.unified_msg_origin,
+            key=TVLS_ENABLED_KEY,
+            default=True,
+        )
+        return True if value is None else bool(value)
+    except Exception:
+        logger.debug(
+            "[text_voice_lang_split] Failed to read tvls_enabled, defaulting to enabled"
+        )
+        return True
+
+
+async def set_tvls_enabled(event, enabled: bool) -> bool:
+    """Persist the per-session voice toggle; returns False on write failure."""
+    try:
+        await sp.put_async(
+            scope="umo",
+            scope_id=event.unified_msg_origin,
+            key=TVLS_ENABLED_KEY,
+            value=enabled,
+        )
+        return True
+    except Exception:
+        logger.warning(
+            "[text_voice_lang_split] Failed to persist tvls_enabled",
+            exc_info=True,
+        )
+        return False
 
 
 class TempFileManager:
@@ -59,6 +96,51 @@ async def voice_slot(semaphore):
         yield
 
 
+async def produce_voice_paths(
+    context, config, event, text: str, tts_provider, semaphore
+) -> list[tuple[str, str]] | None:
+    """Translate + optionally split + synthesize; returns [(path, chunk_text)].
+
+    Acquires the semaphore slot exactly once — callers must NOT also acquire.
+    On any chunk failure, already-generated files are deleted and None is
+    returned (callers fall back to text-only, preserving v1.9.1 behavior).
+    """
+    async with voice_slot(semaphore):
+        translated = await translate.translate_text(context, config, text, event)
+        if not translated:
+            return None
+
+        if config.get("split_tts_by_sentence", False):
+            chunks = text_utils.split_sentences(
+                translated, int(config.get("tts_split_max_chars", 200))
+            )
+        else:
+            chunks = [translated]
+
+        paths: list[tuple[str, str]] = []
+        for chunk in chunks:
+            try:
+                path = await tts_provider.get_audio(chunk)
+            except Exception:
+                logger.error(
+                    "[text_voice_lang_split] TTS generation failed, keeping original",
+                    exc_info=True,
+                )
+                path = None
+            if not path:
+                logger.error(
+                    "[text_voice_lang_split] TTS returned empty path, skipping"
+                )
+                for p, _ in paths:
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+                return None
+            paths.append((path, chunk))
+        return paths
+
+
 async def send_streaming_follow_up(
     context,
     config,
@@ -79,6 +161,11 @@ async def send_streaming_follow_up(
             "[text_voice_lang_split] Agent live mode detected, "
             "skipping plugin TTS to avoid conflict with built-in agent TTS"
         )
+        streaming_texts.pop(session_key, None)
+        return
+
+    if not await is_tvls_enabled(event):
+        logger.debug("[text_voice_lang_split] Voice disabled for session, skip")
         streaming_texts.pop(session_key, None)
         return
 
@@ -130,44 +217,30 @@ async def send_streaming_follow_up(
         f"[text_voice_lang_split] Streaming: translating '{accumulated[:50]}...'"
     )
 
-    async with voice_slot(semaphore):
-        translated = await translate.translate_text(
-            context, config, filtered_text, event
-        )
-        if not translated:
-            logger.info(
-                "[text_voice_lang_split] Streaming translation failed, text only"
-            )
-            return
+    voice = await produce_voice_paths(
+        context, config, event, filtered_text, tts_provider, semaphore
+    )
+    if voice is None:
+        logger.info("[text_voice_lang_split] Streaming translation failed, text only")
+        return
 
-        try:
-            audio_path = await tts_provider.get_audio(translated)
-            if not audio_path:
-                logger.error(
-                    "[text_voice_lang_split] Streaming TTS returned empty path, skipping"
-                )
-                return
-            event.track_temporary_local_file(audio_path)
-        except Exception:
-            logger.error(
-                "[text_voice_lang_split] Streaming TTS generation failed",
-                exc_info=True,
-            )
-            return
+    for path, _ in voice:
+        event.track_temporary_local_file(path)
 
     delay = config.get("streaming_follow_up_delay", 1.5)
     await asyncio.sleep(delay)
 
-    chain = MessageChain()
-    chain.chain = [Record(file=audio_path, url=audio_path, text=translated)]
-    try:
-        await context.send_message(event.unified_msg_origin, chain)
-    except Exception:
-        logger.error(
-            "[text_voice_lang_split] Failed to send streaming voice follow-up",
-            exc_info=True,
-        )
-        return
+    for path, chunk_text in voice:
+        chain = MessageChain()
+        chain.chain = [Record(file=path, url=path, text=chunk_text)]
+        try:
+            await context.send_message(event.unified_msg_origin, chain)
+        except Exception:
+            logger.error(
+                "[text_voice_lang_split] Failed to send streaming voice follow-up",
+                exc_info=True,
+            )
+            return
 
     logger.info("[text_voice_lang_split] Streaming voice sent as follow-up")
 
@@ -200,31 +273,27 @@ async def send_deferred_voice(
         )
         return
 
-    async with voice_slot(semaphore):
-        translated = await translate.translate_text(context, config, text, event)
-        if not translated:
-            logger.info("[text_voice_lang_split] Deferred voice translation failed")
-            return
+    if not await is_tvls_enabled(event):
+        logger.debug(
+            "[text_voice_lang_split] Voice disabled for session, skip deferred voice"
+        )
+        return
 
-        try:
-            audio_path = await tts_provider.get_audio(translated)
-            if not audio_path:
-                logger.error(
-                    "[text_voice_lang_split] Deferred voice TTS returned empty path"
-                )
-                return
-            temp_manager.track(audio_path)
-        except Exception:
-            logger.error(
-                "[text_voice_lang_split] Deferred voice TTS generation failed",
-                exc_info=True,
-            )
-            return
+    voice = await produce_voice_paths(
+        context, config, event, text, tts_provider, semaphore
+    )
+    if voice is None:
+        logger.info("[text_voice_lang_split] Deferred voice translation failed")
+        return
 
-    chain = MessageChain()
-    chain.chain = [Record(file=audio_path, url=audio_path, text=translated)]
+    for path, _ in voice:
+        temp_manager.track(path)
+
     try:
-        await context.send_message(event.unified_msg_origin, chain)
+        for path, chunk_text in voice:
+            chain = MessageChain()
+            chain.chain = [Record(file=path, url=path, text=chunk_text)]
+            await context.send_message(event.unified_msg_origin, chain)
     except Exception:
         logger.error(
             "[text_voice_lang_split] Failed to send deferred voice",
@@ -233,4 +302,5 @@ async def send_deferred_voice(
     else:
         logger.info("[text_voice_lang_split] Deferred voice sent as follow-up")
     finally:
-        temp_manager.release(audio_path)
+        for path, _ in voice:
+            temp_manager.release(path)

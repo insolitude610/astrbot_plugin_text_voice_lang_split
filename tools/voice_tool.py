@@ -49,6 +49,10 @@ class VoiceTool(FunctionTool[AstrAgentContext]):
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs: Any
     ) -> str:
+        from .. import voice_utils
+
         event = context.context.event
+        if not await voice_utils.is_tvls_enabled(event):
+            return "Voice is currently disabled for this session, do not call again."
         event.set_extra("_tvls_voice_requested", True)
         return "Voice message will be sent."
