@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.9.0
+
+- **纯结构重构：拆分 680 行 main.py 为四个职责单一模块**，行为零变化：
+  - `prompts.py`：情感策略常量与翻译 prompt 构建（纯模块，可独立单测）
+  - `translate.py`：LLM 翻译（超时/重试），`_translate_text` 方法改为模块函数 `translate_text`
+  - `text_utils.py`：`strip_thinking` / `filter_text_for_tts` / `compile_filter_patterns`
+  - `voice_utils.py`：流式补发 / 延迟语音发送
+  - `main.py` 仅保留 4 个 hook 与流程编排（约 250 行）
+- **依赖显式传入**：所有逻辑函数改为模块级函数，context/config/event 以参数传入，为后续修复与单元测试铺路
+- 新增 `tests/test_split_parity.py`（7 项）：从 git tag v1.8.0 加载拆分前 main.py，与拆分后模块输出**逐字节对比**（情感策略、思考剥离、文本过滤、翻译 prompt、系统 prompt），锁定零行为变化
+- 既有四个测试套件迁移至新模块导入路径后全部通过
+
 ## v1.8.0
 
 - **新增 `emotion_intensity` 配置项**：控制 TTS 文本中情绪标签的使用强度，三档可选：
