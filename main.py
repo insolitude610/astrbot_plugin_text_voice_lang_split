@@ -187,21 +187,21 @@ class TextVoiceLangSplit(Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(
-        "tvls", alias={"语音开关"}, desc="切换本会话的文本-语音分离语音（管理员）"
+        "tvls", alias={"语音开关"}, desc="切换本会话的文本-语音分离（管理员）"
     )
     async def tvls_command(self, event: AstrMessageEvent, action: str = "status"):
         cmd = (action or "status").strip().lower()
         if cmd in ("on", "enable", "开"):
             if not await voice_utils.set_tvls_enabled(event, True):
                 return event.plain_result("语音开关写入失败，请检查日志。")
-            return event.plain_result("本会话文本-语音分离语音已开启。")
+            return event.plain_result("本会话文本-语音分离已开启。")
         if cmd in ("off", "disable", "关"):
             if not await voice_utils.set_tvls_enabled(event, False):
                 return event.plain_result("语音开关写入失败，请检查日志。")
-            return event.plain_result("本会话文本-语音分离语音已关闭。")
+            return event.plain_result("本会话文本-语音分离已关闭。")
         enabled = await voice_utils.is_tvls_enabled(event)
         return event.plain_result(
-            f"本会话文本-语音分离语音状态：{'开启' if enabled else '关闭'}\n"
+            f"本会话文本-语音分离状态：{'开启' if enabled else '关闭'}\n"
             f"用法：/tvls on|off（管理员）"
         )
 
