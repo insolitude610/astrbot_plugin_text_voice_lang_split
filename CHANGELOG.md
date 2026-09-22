@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.10.1
+
+- **扩充 `tvls_send_voice` 工具描述**（`tools/voice_tool.py`）：依据 Fish Audio S2 情绪标签文档重写 LLM 判断提示词，帮助模型更准地判断发送时机
+  - 白名单 3 类 → 6 类：撒娇俏皮（含撒娇式吃醋）、温柔关怀（`[empathetic]` `[compassionate]` `[grateful]` `[hopeful]`）、怀旧被感动（`[nostalgic]` `[moved]`）、害羞脸红（`[embarrassed]`）、低落脆弱（`[slightly sad]` `[lonely]` `[regretful]`）、平静好奇
+  - 黑名单 5 类 → 6 类，并按官方强度阶梯补上明确分界线：`[nervous]`/`[worried]` 可发、`[scared]`/`[terrified]` 不可；柔和 `[delighted]` 可发、`[excited]`/`[ecstatic]` 不可；温暖 `[confident]` 可发、`[commanding]`/`[solemn]`/`[narrator]` 不可。新增第 6 类「数据型内容」（代码/命令/日志/JSON/列表/表格/公式/URL/路径/步骤说明/长篇技术解释）一律跳过
+  - 新增两条硬约束：整条回复都会被朗读（不能只挑一句）；每条回复最多调用一次
+  - 音效与语气标记（`[laughing]` `[sobbing]` `[sighing]` `[gasping]` `[shouting]` `[whispering]` 等）统一作为**反向信号**出现，与翻译层 `TTS-SAFE EMOTION POLICY` 的禁令保持一致；修正旧文案中 warm giggles / subdued weeping 与「翻译层禁止 laughing/sobbing cue」的内部矛盾
+  - 新增防泄漏护栏：情绪 cue 由翻译层添加，禁止主模型在回复正文里书写 cue（`remove_patterns` 不过滤方括号）
+
 ## v1.10.0
 
 - **新增 `/tvls` 会话级语音开关命令**（管理员权限，别名「语音开关」）：`/tvls on|off` 切换本会话的文本-语音分离功能，无参数查询状态。状态按会话（unified_msg_origin）持久化到 AstrBot 存储（`sp` scope="umo"，默认开启），配置/插件重载不丢失
