@@ -1,6 +1,18 @@
+<div align="center">
+
+<img src="assets/astrbot_mute.gif" width="150" alt="astrbot娘静音">
+
 # 文本语音语言分离 (Text-Voice Lang Split)
 
 让 Bot 展示中文文本的同时，用其他语言（如日语）合成语音。支持任意 TTS 提供商，兼容流式/非流式模式，跨平台通用。
+
+[![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.22.0-orange?style=flat-square)](https://github.com/AstrBotDevs/AstrBot)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
+
+</div>
+
+---
 
 ## 特性
 
