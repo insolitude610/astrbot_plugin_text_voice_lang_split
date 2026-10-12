@@ -146,6 +146,16 @@ FishAudio S2 uses natural-language `[bracket]` cues. English words are recognize
 
 Recognized tags: `whisper`, `emphasis`, `soft`, `fast`, `slow`, `stress`, `forceful`. A tag spanning a sentence end merges those sentences into one chunk by design. An unclosed tag is not special-cased — the splitter must never hang or drop text on malformed model output.
 
+### Leading cue stripping — why position zero is special
+
+`text_utils.strip_leading_cues` removes `[cue]` markup at the very start of a reply (including stacked cues like `[calm][whispering]`), because the prompt always places a cue immediately before the words it governs and never at position zero. A leading bracket is therefore a model violation, and removing it keeps a violating reply speakable on providers that accept no markup.
+
+Rules that must hold:
+- Only a **leading** cue is removed. A cue later in the text is deliberate semantics and must survive, because only the TTS model can interpret it.
+- Paired `<tag>` markup is never touched here.
+- A bracket that is data, not a cue (e.g. a list like `[1] 通过`), is not leading and must not be touched.
+- This runs inside `filter_text_for_tts`, i.e. **before translation**, so it acts on the LLM's raw reply.
+
 ## `GENERAL_RESULT` side effects
 
 Setting `result.result_content_type = ResultContentType.GENERAL_RESULT`:

@@ -20,6 +20,27 @@ def compile_filter_patterns(patterns) -> list:
     return compiled
 
 
+# A bracketed cue at the very start of a reply, e.g. "[happy] ..." or
+# "[calm][whispering] ...". Leading position makes it unambiguous: real
+# dialogue essentially never opens with a bracketed aside, so this is safe to
+# remove even for providers that accept no cue markup at all.
+_LEADING_CUE_RE = re.compile(r"^\s*(?:\[[^\]\n]{1,60}\]\s*)+")
+
+
+def strip_leading_cues(text: str) -> str:
+    """Remove cue markup that a translation model wrongly put at the start.
+
+    The prompt always places a cue immediately before the words it governs,
+    inside the reply, so a bracketed cue at position zero is a prompt
+    violation. Removing it keeps a violating reply speakable on every
+    provider. Cues elsewhere stay untouched, because there they are
+    deliberate semantics that only the TTS model can interpret.
+    """
+    if not text or "[" not in text:
+        return text
+    return _LEADING_CUE_RE.sub("", text, count=1)
+
+
 def filter_text_for_tts(text: str, patterns) -> str:
     """Strip visual noise (markdown, URLs, code, user patterns) pre-translation."""
     if not text:
@@ -29,6 +50,7 @@ def filter_text_for_tts(text: str, patterns) -> str:
     text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
     text = re.sub(r"https?://[a-zA-Z0-9./?#&=\-+%:!*'();,@[\]~_$]+", "", text)
     text = re.sub(r"[*_~]{1,3}", "", text)
+    text = strip_leading_cues(text)
     for pattern in patterns:
         text = pattern.sub("", text)
     return text
