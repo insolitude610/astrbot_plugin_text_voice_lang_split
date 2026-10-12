@@ -12,10 +12,24 @@
     "hint": "附加到翻译提示词中的自定义指令。例如：'使用可爱的语气翻译'或'保持敬语风格'。留空则使用默认翻译提示词"
   },
   "emotion_intensity": {
-    "description": "情绪标签策略",
+    "description": "情绪/表演标记策略",
     "type": "string",
     "default": "universal_safe",
-    "hint": "控制 TTS 文本中情绪/表演标记的生成方式。⚠️ 除 universal_safe 外，其余档位都会向文本写入标记，只有确认你的 TTS 供应商能把标记解释成表演（而不是照字念出来）时才可选，否则语音里会念出 [happy]、<whisper> 这类字符。\nuniversal_safe（默认）：完全不生成任何标记，纯文本、任意 TTS 供应商都安全。\nexpressive：每个有情绪的句子都加标签，表现力最强（Fish Audio S2 系）。\nauto：有明显情绪的句子加一个标签，中性句不加（Fish Audio S2 系）。\ndrama3：Drama 3 专属档，支持自由自然语言导演、音效/停顿标记与成对行内标签（需 Drama 3 模型）。\nrestrained：保守档，通常不加标签，仅保留最克制的 12 个标签（Fish Audio S2 系）。\n未知值按 universal_safe 处理"
+    "options": [
+      "universal_safe",
+      "drama3",
+      "auto",
+      "expressive",
+      "restrained"
+    ],
+    "labels": [
+      "无标记（默认·任意 TTS）",
+      "Drama 3 导演（Fish Audio Drama 3）",
+      "标准情绪标签（Fish Audio S2 系）",
+      "强化情绪标签（Fish Audio S2 系）",
+      "保守情绪标签（Fish Audio S2 系）"
+    ],
+    "hint": "⚠️ 只有第一项「无标记」对任意 TTS 供应商都安全。其余四项都会向译文写入标记，只有确认你的 TTS 能把标记解释成表演（而不是照字念出来）时才可选，否则语音会念出 [happy]、<whisper> 这类字符。\n\n· 无标记：完全不生成任何标记，纯文本。Edge TTS / OpenAI TTS / Azure TTS / 其他供应商请用这项。\n· Drama 3 导演：自由自然语言导演 + 音效/停顿标记 + 成对行内标签 <whisper> 等。需要提供商模型 ID 填 drama-3-preview。\n· 标准情绪标签：有明显情绪的句子加一个 [标签]，中性句不加。\n· 强化情绪标签：情绪句必加标签，表现力最强。\n· 保守情绪标签：通常不加标签，仅保留最克制的 12 个标签。\n\n格式错误或不在列表中的值一律按「无标记」处理。"
   },
   "streaming_follow_up_delay": {
     "description": "流式模式下语音跟进的延迟(秒)",

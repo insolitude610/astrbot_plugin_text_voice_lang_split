@@ -57,7 +57,7 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 |--------|--------|------|
 | `voice_language` | `日语` | 语音目标语言，支持模型能处理的任意语言 |
 | `translate_instructions` | (空) | 自定义翻译指令，如"使用可爱的语气翻译"。填写后会追加到默认 prompt 后 |
-| `emotion_intensity` | `universal_safe` | 情绪/表演标记策略。⚠️ 除 `universal_safe` 外，其余档位都会向译文写入标记，**只有确认你的 TTS 供应商能把标记解释成表演（而不是照字念出来）时才可选**。<br>`universal_safe`（默认）：完全不生成任何标记，纯文本，任意 TTS 供应商都安全<br>`drama3`：Drama 3 专属，支持自由自然语言导演、音效/停顿标记与成对行内标签（需 `drama-3-preview` 模型）<br>`auto`：有明显情绪的句子加一个标签，中性句不加（Fish Audio S2 系）<br>`expressive`：情绪句必加标签，表现力最强（Fish Audio S2 系）<br>`restrained`：保守档，通常不加标签，仅保留最克制的 12 个标签（Fish Audio S2 系）<br>未知/空值按 `universal_safe` 处理 |
+| `emotion_intensity` | `universal_safe` | 情绪/表演标记策略，**面板里是下拉选择**。⚠️ 只有「无标记」对任意 TTS 供应商都安全，其余档位都会向译文写入标记，**只有确认你的 TTS 能解释这些标记时才可选**。<br>「无标记」`universal_safe`（默认）：纯文本，任意供应商<br>「Drama 3 导演」`drama3`：自由导演 + 音效 + 成对标签（需 `drama-3-preview`）<br>「标准情绪标签」`auto`：情绪句加一个 `[标签]`（Fish Audio S2 系）<br>「强化情绪标签」`expressive`：情绪句必加标签（Fish Audio S2 系）<br>「保守情绪标签」`restrained`：通常不加标签（Fish Audio S2 系）<br>格式错误或不在列表中的值按「无标记」处理 |
 | `translate_provider` | (空) | 翻译用 LLM Provider，留空则复用当前聊天的 Provider |
 | `translate_timeout` | `30` | 翻译请求超时(秒)，超时后自动重试一次（间隔 0.5s），设为 0 关闭超时 |
 | `tts_max_chars` | `0` | 过滤后的文本超过此字符数时跳过翻译和 TTS。设为 0 不限制 |

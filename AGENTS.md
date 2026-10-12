@@ -211,6 +211,10 @@ Register in `initialize()` via `self.context.add_llm_tools(tool_instance)`. Regi
 
 `_conf_schema.json` types: `int`, `float`, `bool`, `string`, `text`, `list`, `file`, `object`, `template_list`. `"integer"` → `TypeError`.
 
+**Dropdown selects:** a `string` field with an `options` array renders as a dropdown. `labels` is an optional parallel array — the dashboard shows `labels[i]` and stores `options[i]` (`ConfigItemRenderer.vue: getSelectItems`, indexes aligned, falls back to the raw option when a label is missing). Neither array is validated by the backend, so a typo'd option silently becomes an unselectable value that resolves to the fallback mode.
+
+`tests/test_translation_prompt.py` guards this: `test_schema_offers_exactly_the_supported_modes` pins the option set to the implemented modes, the default to the first entry, and the label/option lengths; `test_only_the_default_mode_is_cue_free` enforces the schema's promise that only the first option emits no markup.
+
 ## Tests
 
 Three test suites, all in `tests/` (gitignored):

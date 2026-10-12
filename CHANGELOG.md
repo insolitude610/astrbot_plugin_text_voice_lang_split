@@ -8,10 +8,11 @@
   - `auto` / `expressive` / `restrained`：文本、标签列表与语义**逐字节不变**，继续面向 Fish Audio S2 系；`restrained` 的 v1.6.0 兼容保证仍然成立
   - **行为变更（需注意）**：未知、空、以及格式错误的值现在回落到 `universal_safe`（原为 `auto`）。即"配置损坏"不再会静默开始写标记。已有用户若显式配置过 `auto`/`expressive`/`restrained` 则完全不受影响；`translate.py` 的 `config.get` 默认值同步为 `universal_safe`，与 schema 默认值保持一致
   - 配置项 hint 重写：明确标注**只有确认 TTS 供应商能把标记解释成表演时才可选**这些档位，并列明各档位适用的供应商
+- **`emotion_intensity` 改为 WebUI 下拉选择**：新增 `options` + `labels`（AstrBot 面板按索引对齐渲染，显示 `labels[i]`、存储 `options[i]`），不再需要手打档位名，避免拼错后静默回落到无标记档。推荐档位排在首位，描述性中文标签直接标明适用供应商；hint 用短标签 + 说明的形式重排，比原来的长段落更好读
 - **句切分新增成对标签保护**（`text_utils.split_sentences`）：成对行内标签内部不再是合法切分点，避免 `<whisper>…</whisper>` 被切成两次独立 TTS 请求（会丢失效果或把标签念出来）。跨越句末的标签会使其所在句子合并为一个音频块；标签比 `tts_split_max_chars` 还长时按"长块优于破坏标签"原则优先向后寻找安全边界，最后才回退到精确上限以保证始终前进。畸形（未闭合）标签不做特殊处理，绝不挂起或吞字
   - 内部重构：切分改为"在原串上用掩码标记不可切区间 + 游标推进"，替代原先先 split 再逐段处理的写法，使偏移量在硬切后依然有效
 - **新增前置标记防御性剥离**（`text_utils.strip_leading_cues`）：prompt 从不要求把标记写在文本开头（标记总是紧贴它所管辖的词），因此**位置 0 处的 `[标记]` 必然是翻译模型的违规输出**。过滤阶段移除它，保证违规回复在任何供应商上仍然可读；文本中部的标记保持原样（那里是有意义语义，只有 TTS 模型能解释），成对标签 `<whisper>` 一律不动
-- `tests/test_translation_prompt.py`：新增 9 项（无标签默认/回落语义/五档派发唯一性/drama3 三类能力/严格音效策略/音效与成对标签的禁令保留），并将 REF 参考层同步到新档位
+- `tests/test_translation_prompt.py`：新增 11 项（无标签默认/回落语义/五档派发唯一性/drama3 三类能力/严格音效策略/音效与成对标签的禁令保留/下拉选项与代码一致性/labels 对齐/仅默认档无标记），并将 REF 参考层同步到新档位
 - `tests/test_filter_text_for_tts.py`：新增 8 项前置标记剥离测试（单个/连续/带空白/中部保留/成对标签保留/非行首括号不误伤/不吞正文/REAL 一致性）
 - `tests/test_split_and_toggle.py`：新增 5 项成对标签切分保护测试
 - `tests/test_split_parity.py`：字节级对比限定在显式 legacy 档位名；新增"新档位纯增量"断言（新增 key 必须恰好是 `universal_safe` 与 `drama3`）
