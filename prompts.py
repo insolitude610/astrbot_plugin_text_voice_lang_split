@@ -2,8 +2,85 @@
 
 Pure module: no AstrBot imports, fully standalone-testable.
 Extracted verbatim from main.py (pre-v1.8.0 split) — byte-identical output
-is locked by tests/test_split_parity.py.
+is locked by tests/test_split_parity.py for the legacy modes.
+
+Emotion modes (config key `emotion_intensity`):
+- "universal_safe" (default): no cue markup at all, so any TTS provider can
+  read the text verbatim.
+- "drama3": free-form delivery directions, source-grounded sound/pause
+  markers, and paired inline tags.
+- "auto" / "expressive" / "restrained": bracketed Fish Audio S2 emotion tags.
+  These emit provider-specific markup and must only be selected for a TTS
+  provider that interprets it.
 """
+
+_EMOTION_POLICY_UNIVERSAL_SAFE = (
+    "=== TTS-SAFE EMOTION POLICY ===\n"
+    "1. Do not add any emotion, tone, delivery, or sound cue markup. "
+    "The configured TTS provider is not known to interpret such markup, "
+    "so any cue you emit may be read aloud literally.\n"
+    "2. Convey all feeling through wording, rhythm, and language-appropriate "
+    "sentence endings only. The translated text must be plain, clean speech.\n"
+    "3. NEVER output markup of any kind: no square-bracket cues, no angle-bracket "
+    "tags, no provider-specific phoneme-control markup, and no parenthesized "
+    "stage directions or performance notes.\n"
+    "4. This rule is unconditional. Even if the user translation instructions "
+    "ask for emotion cues, do not emit them; express the requested emotion "
+    "through the wording instead.\n\n"
+)
+
+_EMOTION_POLICY_DRAMA3 = (
+    "=== TTS-SAFE EMOTION POLICY ===\n"
+    "The configured TTS model accepts free-form delivery directions, inline "
+    "sound and pause markers, and paired word-level tags. Use them the way a "
+    "director would brief a voice actor.\n\n"
+    "OVERALL LIMITS\n"
+    "1. Never fabricate performance content. Every direction, sound, and pause "
+    "you emit must be justified by the source text. You may modulate HOW an "
+    "existing line is spoken, but never add events, actions, or ambient sound "
+    "the source does not contain.\n"
+    "2. Never place a cue inside the quoted speech of a verbatim quotation or "
+    "inside a proper name, number, or URL.\n"
+    "3. Keep direction text short, concrete, and in English. A direction may "
+    "legitimately describe more than one facet at once when the source clearly "
+    "supports it, for example a feeling plus visible effort. Never emit two "
+    "mutually contradictory cues in the same direction, and never repeat a "
+    "direction whose meaning has not changed.\n\n"
+    "DELIVERY DIRECTIONS (square brackets)\n"
+    "4. Put a direction at the point where the delivery begins. Free-form "
+    "natural language is allowed and preferred over an isolated emotion word. "
+    "Name the emotion, intent, or pace, and a physical tell only when the source "
+    "actually shows one. Example: [almost crying but forcing a smile].\n"
+    "5. Put a direction at the start of a sentence. Never split a sentence with "
+    "a direction in the middle of a clause.\n"
+    "6. Usually one direction per sentence is enough. At most two are allowed "
+    "when the source sentence has a clear emotional reversal. Directions must "
+    "never be stacked.\n"
+    "7. Directions are never spoken. They must always stay inside their square "
+    "brackets, separate from the translated {voice_lang} wording.\n\n"
+    "SOUNDS AND PAUSES (square brackets)\n"
+    "8. A sound or pause marker may be emitted ONLY when the source text itself "
+    "contains that exact reaction: a described laugh, sob, sigh, breath, gasp, "
+    "scream, or an explicit pause or silence. Place it exactly where it happens, "
+    "not at the start of the sentence.\n"
+    "9. Keep each sound marker to a few plain words. Never describe a sound in "
+    "a long phrase, and never invent a sound track, background ambience, or "
+    "off-screen noise.\n"
+    "10. Never imitate a sound with written letters. Do not elongate vowels or "
+    "repeat syllables to spell out sobbing, laughter, or screaming; if the "
+    "source represents a sound that way, emit a short bracketed marker instead.\n\n"
+    "PAIRED INLINE TAGS (angle brackets)\n"
+    "11. Use a paired tag to change the delivery of specific words only, for "
+    "example <whisper>I am fine.</whisper>. Supported tags: <whisper>, "
+    "<emphasis>, <soft>, <fast>, <slow>, <stress>, <forceful>.\n"
+    "12. Wrap only the words whose delivery changes, and always close the tag "
+    "inside the same sentence you opened it in. Never nest paired tags, and "
+    "never leave one unclosed.\n"
+    "13. Never use the phoneme-control markup form with vertical bars and a "
+    "phoneme_start marker. Pronunciation markup requires a separate, "
+    "language- and provider-specific processor; the translation model must not "
+    "guess it.\n\n"
+)
 
 _EMOTION_POLICY_RESTRAINED = (
     "=== TTS-SAFE EMOTION POLICY ===\n"
@@ -126,6 +203,15 @@ _EMOTION_POLICY_EXPRESSIVE = (
 )
 
 _EMOTION_SYSTEM_LINES = {
+    "universal_safe": (
+        "Emotion cues: none. Add no cue markup of any kind; "
+        "convey feeling through wording alone."
+    ),
+    "drama3": (
+        "Emotion cues: the TTS model accepts free-form delivery directions, "
+        "inline sound markers only where the source has that reaction, "
+        "and paired word-level tags."
+    ),
     "restrained": "Emotion cues are optional.",
     "auto": (
         "Emotion cues: add one concise tag for clearly emotional sentences; "
@@ -137,29 +223,47 @@ _EMOTION_SYSTEM_LINES = {
     ),
 }
 
+# Named policies, looked up and formatted once per call.
+_EMOTION_POLICIES = {
+    "universal_safe": _EMOTION_POLICY_UNIVERSAL_SAFE,
+    "drama3": _EMOTION_POLICY_DRAMA3,
+    "restrained": _EMOTION_POLICY_RESTRAINED,
+    "auto": _EMOTION_POLICY_AUTO,
+    "expressive": _EMOTION_POLICY_EXPRESSIVE,
+}
+
+DEFAULT_EMOTION_MODE = "universal_safe"
+
+
+def _normalize_mode(mode: str) -> str:
+    """Normalize a config value to a known mode name.
+
+    Unknown, empty, or malformed values fall back to DEFAULT_EMOTION_MODE
+    (the provider-agnostic no-cue policy), never to a cue-emitting mode:
+    a bad config value must not silently start emitting cue markup that the
+    user's TTS provider may read aloud.
+    """
+    mode = (mode or "").strip().lower()
+    if mode in _EMOTION_POLICIES:
+        return mode
+    return DEFAULT_EMOTION_MODE
+
 
 def emotion_policy_block(mode: str, voice_lang: str) -> str:
     """Return the TTS-SAFE EMOTION POLICY section for the given mode.
 
-    Modes: "auto" (default), "expressive", "restrained". Unknown,
-    empty, or malformed values fall back to "auto".
+    Modes: "universal_safe" (default, no cue markup at all),
+    "drama3" (free-form directions, source-grounded sound markers,
+    paired inline tags), "auto" and "expressive" (bracketed Fish Audio
+    S2 emotion tags), "restrained" (conservative S2 tags).
+    Unknown, empty, or malformed values fall back to "universal_safe".
     """
-    mode = (mode or "").strip().lower()
-    if mode == "restrained":
-        return _EMOTION_POLICY_RESTRAINED.format(voice_lang=voice_lang)
-    if mode == "expressive":
-        return _EMOTION_POLICY_EXPRESSIVE.format(voice_lang=voice_lang)
-    return _EMOTION_POLICY_AUTO.format(voice_lang=voice_lang)
+    return _EMOTION_POLICIES[_normalize_mode(mode)].format(voice_lang=voice_lang)
 
 
 def emotion_system_line(mode: str) -> str:
     """Return the mode-aware emotion line for the translation system prompt."""
-    mode = (mode or "").strip().lower()
-    if mode == "restrained":
-        return _EMOTION_SYSTEM_LINES["restrained"]
-    if mode == "expressive":
-        return _EMOTION_SYSTEM_LINES["expressive"]
-    return _EMOTION_SYSTEM_LINES["auto"]
+    return _EMOTION_SYSTEM_LINES[_normalize_mode(mode)]
 
 
 def build_user_instructions_block(custom_instructions: str) -> str:

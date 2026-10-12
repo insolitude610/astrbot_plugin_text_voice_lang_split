@@ -28,7 +28,9 @@ async def translate_text(context, config, text, event) -> str | None:
     voice_lang = config.get("voice_language", "Japanese")
     custom_instructions = config.get("translate_instructions", "").strip()
 
-    emotion_mode = config.get("emotion_intensity", "auto")
+    # Fallback matches the schema default: cue-free, so a config missing the
+    # key never starts emitting markup an unknown TTS provider may read aloud.
+    emotion_mode = config.get("emotion_intensity", "universal_safe")
     emotion_policy = prompts.emotion_policy_block(emotion_mode, voice_lang)
     emotion_system_line = prompts.emotion_system_line(emotion_mode)
 

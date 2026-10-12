@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.11.0
+
+- **默认档改为无标签（`universal_safe`），并新增 Fish Audio Drama 3 专属档（`drama3`）**。`emotion_intensity` 从"情绪强度"重新定位为"标记语法家族"——四个档位写入译文的标记语法互不兼容，选错会让 TTS 把标记照字念出来
+  - `universal_safe`（**新默认**）：完全不生成任何标记，纯文本，任意 TTS 供应商（Edge / OpenAI / Azure / FishAudio）都安全。策略文本中不含任何 `[` 或 `<`，由测试字面锁定
+  - `drama3`（**新增**）：依据 Fish Audio Drama 3 文档实现，支持三类标记——自由自然语言导演 `[almost crying but forcing a smile]`、音效/停顿 `[sigh]`、成对行内标签 `<whisper>…</whisper>`（官方 7 个：`whisper` `emphasis` `soft` `fast` `slow` `stress` `forceful`）。**音效采用严格策略**：只允许翻译原文已有的哭声/笑声/叹息等，明确禁止编造音效、环境音与画外音
+  - `auto` / `expressive` / `restrained`：文本、标签列表与语义**逐字节不变**，继续面向 Fish Audio S2 系；`restrained` 的 v1.6.0 兼容保证仍然成立
+  - **行为变更（需注意）**：未知、空、以及格式错误的值现在回落到 `universal_safe`（原为 `auto`）。即"配置损坏"不再会静默开始写标记。已有用户若显式配置过 `auto`/`expressive`/`restrained` 则完全不受影响；`translate.py` 的 `config.get` 默认值同步为 `universal_safe`，与 schema 默认值保持一致
+  - 配置项 hint 重写：明确标注**只有确认 TTS 供应商能把标记解释成表演时才可选**这些档位，并列明各档位适用的供应商
+- **句切分新增成对标签保护**（`text_utils.split_sentences`）：成对行内标签内部不再是合法切分点，避免 `<whisper>…</whisper>` 被切成两次独立 TTS 请求（会丢失效果或把标签念出来）。跨越句末的标签会使其所在句子合并为一个音频块；标签比 `tts_split_max_chars` 还长时按"长块优于破坏标签"原则优先向后寻找安全边界，最后才回退到精确上限以保证始终前进。畸形（未闭合）标签不做特殊处理，绝不挂起或吞字
+  - 内部重构：切分改为"在原串上用掩码标记不可切区间 + 游标推进"，替代原先先 split 再逐段处理的写法，使偏移量在硬切后依然有效
+- `tests/test_translation_prompt.py`：新增 9 项（无标签默认/回落语义/五档派发唯一性/drama3 三类能力/严格音效策略/音效与成对标签的禁令保留），并将 REF 参考层同步到新档位
+- `tests/test_split_and_toggle.py`：新增 5 项成对标签切分保护测试
+- `tests/test_split_parity.py`：字节级对比限定在显式 legacy 档位名；新增"新档位纯增量"断言（新增 key 必须恰好是 `universal_safe` 与 `drama3`）
+
 ## v1.10.1
 
 - **扩充 `tvls_send_voice` 工具描述**（`tools/voice_tool.py`）：依据 Fish Audio S2 情绪标签文档重写 LLM 判断提示词，帮助模型更准地判断发送时机

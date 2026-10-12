@@ -17,7 +17,8 @@
 ## 特性
 
 - 文本与语音使用不同语言，如显示中文 + 朗读日语
-- 翻译时自动插入情绪标签（`[嬉しい]`、`[悲しい]` 等），配合 FishAudio 等 TTS 实现情感语音
+- **默认不写入任何标记**：译文是纯文本，任何 TTS 供应商都可以安全朗读
+- 可选开启情绪标签（Fish Audio S2 系）或 Drama 3 的表演导演能力，按 TTS 供应商选择
 - 支持任意 TTS 提供商（Edge TTS、OpenAI TTS、Azure TTS、FishAudio 等）
 - 兼容流式和非流式输出
 - 跨平台通用（Windows / macOS / Linux）
@@ -56,7 +57,7 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 |--------|--------|------|
 | `voice_language` | `日语` | 语音目标语言，支持模型能处理的任意语言 |
 | `translate_instructions` | (空) | 自定义翻译指令，如"使用可爱的语气翻译"。填写后会追加到默认 prompt 后 |
-| `emotion_intensity` | `auto` | 情绪标签使用强度：`auto`（默认，有明显情绪的句子自动加一个标签，中性句不加）；`expressive`（情绪句必加标签，表现力最强）；`restrained`（保守模式，通常不加标签）。未知值按 `auto` 处理 |
+| `emotion_intensity` | `universal_safe` | 情绪/表演标记策略。⚠️ 除 `universal_safe` 外，其余档位都会向译文写入标记，**只有确认你的 TTS 供应商能把标记解释成表演（而不是照字念出来）时才可选**。<br>`universal_safe`（默认）：完全不生成任何标记，纯文本，任意 TTS 供应商都安全<br>`drama3`：Drama 3 专属，支持自由自然语言导演、音效/停顿标记与成对行内标签（需 `drama-3-preview` 模型）<br>`auto`：有明显情绪的句子加一个标签，中性句不加（Fish Audio S2 系）<br>`expressive`：情绪句必加标签，表现力最强（Fish Audio S2 系）<br>`restrained`：保守档，通常不加标签，仅保留最克制的 12 个标签（Fish Audio S2 系）<br>未知/空值按 `universal_safe` 处理 |
 | `translate_provider` | (空) | 翻译用 LLM Provider，留空则复用当前聊天的 Provider |
 | `translate_timeout` | `30` | 翻译请求超时(秒)，超时后自动重试一次（间隔 0.5s），设为 0 关闭超时 |
 | `tts_max_chars` | `0` | 过滤后的文本超过此字符数时跳过翻译和 TTS。设为 0 不限制 |
@@ -67,6 +68,41 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 **Provider 优先级：** `translate_provider`（手动指定）> 聊天 `/provider` 切换 > 默认 Provider。
 
 **失败回退：** 翻译超时或报错 → 静默不发语音；过滤后文本超 `tts_max_chars` → 静默不发语音；过滤后无内容 → 静默不发语音。
+
+### 情绪标记档位怎么选
+
+`emotion_intensity` 的档位**不是"强度"递进，而是不同的标记语法体系**，必须和你的 TTS 供应商匹配。选错时模型会把标记照着念出来。
+
+| 档位 | 写入译文的标记 | 适用 TTS |
+|------|---------------|----------|
+| `universal_safe`（默认） | 无 | 任意供应商，包括 Edge / OpenAI / Azure TTS |
+| `drama3` | `[自由描述]`、`[音效]`、`<whisper>…</whisper>` | Fish Audio **Drama 3** |
+| `auto` / `expressive` / `restrained` | `[happy]` 等 24 个封闭情绪词 | Fish Audio **S2 系**（`s2-pro` / `s2.1-pro` / `s2.1-pro-free`） |
+| — | — | 其他供应商请保持默认 `universal_safe` |
+
+### 使用 Fish Audio Drama 3
+
+Drama 3 是目前 Fish Audio 最强的表演模型，支持用自然语言"导演"每一句的念法。启用步骤：
+
+1. **AstrBot 面板 → 配置 → 服务提供商 → 你的 `fishaudio` 提供商 → 模型 ID**，把值改成 `drama-3-preview`
+   - ⚠️ 必须精确写成这个字符串。AstrBot 把它原样放进 HTTP `model` 头，**写错或留空时 Fish Audio 不会报错，而是静默回落到 `s2.1-pro`**
+   - 面板里看到的中文名（如「Drama 3」）不是合法的模型 ID，填了等于没启用
+2. **插件配置 → `emotion_intensity` 改为 `drama3`**
+3. 验证：发一句带 `[small laugh]` 的话，听到笑声说明 Drama 3 生效；听到它把 "small laugh" 念出来说明还在 S2 系
+
+`drama3` 档下翻译 LLM 会生成三类标记，全部要求**严格来自原文**，不允许自行加戏：
+
+```text
+[almost crying but forcing a smile] 私は大丈夫。本当よ。
+[sigh] もう行ってくれ。
+<whisper>本当に大丈夫だから。</whisper>
+```
+
+**注意：**
+
+- `drama3` 档与 `split_tts_by_sentence` 同时使用时，成对标签（`<whisper>…</whisper>`）所在句不会被拆开，以保证标签闭合；单个标签长于 `tts_split_max_chars` 时按最佳努力切分
+- 若 `remove_patterns` 里保留了 `\[.*?\]` 这类规则，方括号导演标记会在翻译前被删除，Drama 3 的导演能力会失效，请按需调整
+- Drama 3 官方标注为 Preview，行为可能变化
 
 ### 减少翻译超时
 
@@ -84,7 +120,7 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 
 ## 原理
 
-**非流式模式：** 在消息装饰阶段（`on_decorating_result`）拦截 LLM 的文本结果 → 过滤颜文字/代码块/URL 等视觉噪声 → 调用 LLM 翻译清洁文本（同时自动插入情绪标签如 `[嬉しい]`，支持 FishAudio 等 TTS 的情感语音）→ 剥离翻译输出中的思考/推理产物 → 调用 TTS Provider 生成语音 → 重组消息链为 `[原文文本] + [目标语言语音]`，阻止内置 TTS 重复触发。
+**非流式模式：** 在消息装饰阶段（`on_decorating_result`）拦截 LLM 的文本结果 → 过滤颜文字/代码块/URL 等视觉噪声 → 调用 LLM 翻译清洁文本（按 `emotion_intensity` 档位决定是否写入情绪/表演标记）→ 剥离翻译输出中的思考/推理产物 → 调用 TTS Provider 生成语音 → 重组消息链为 `[原文文本] + [目标语言语音]`，阻止内置 TTS 重复触发。
 
 **流式模式：** 在 `on_llm_response` 捕获 LLM 完整响应文本，并用 async generator wrapper 注入流式发送 → 流式文本全部发送完毕后自动翻译 + TTS 生成语音跟进。不依赖 `after_message_sent`（AstrBot 的 RespondStage 对 `STREAMING_RESULT` 提前 return，该钩子不会触发）。
 

@@ -114,7 +114,37 @@ v1.5.2 attempted to replace this with chain inspection and was immediately rever
 
 ## Emotion tags — English only
 
-FishAudio S2 uses natural-language `[bracket]` cues. English words are recognized; Japanese words (`[嬉しい]`) are spoken as text. Since v1.8.0 the prompt's `=== TTS-SAFE EMOTION POLICY ===` section is generated per mode by `_emotion_policy_block(mode, voice_lang)` (module constants `_EMOTION_POLICY_AUTO/_EXPRESSIVE/_RESTRAINED`): `auto` (default) and `expressive` embed a 24-tag basic-emotion list with `[slightly]`/`[very]` intensity (never `[extremely]`); `restrained` is byte-identical to the v1.6.0 conservative text (12 restrained tags, strong tags only on explicit user request, no very/extremely). Unknown/empty config values fall back to `auto`. Safety bans (sound effects, bodily vocalization, phoneme markup, stacking, >2 tags/sentence) are identical across modes — they are what prevent audio collapse. `translate_instructions` remains HIGH PRIORITY and can override tag policy. The system-prompt emotion line comes from `_emotion_system_line(mode)`.
+FishAudio S2 uses natural-language `[bracket]` cues. English words are recognized; Japanese words (`[嬉しい]`) are spoken as text.
+
+### Modes and the cue-free default (v1.11.0)
+
+`emotion_intensity` selects a **markup syntax family**, not an intensity ramp. The default is `universal_safe`, which emits **no markup at all**, because the plugin cannot know whether a user's TTS provider interprets cue markup or reads it aloud. `auto`, `expressive`, and `restrained` keep their pre-v1.11.0 text byte-for-byte for Fish Audio S2 users; `drama3` is new for the Drama 3 model.
+
+| Mode | Markup emitted | Intended TTS |
+|------|----------------|--------------|
+| `universal_safe` (default) | none | any provider |
+| `drama3` | `[free-form direction]`, source-grounded `[sound]`, paired `<whisper>…</whisper>` | Fish Audio Drama 3 |
+| `auto` / `expressive` / `restrained` | 24-tag S2 emotion list | Fish Audio S2 family |
+
+`prompts._normalize_mode` is the single source of truth. **Unknown, empty, or malformed values fall back to `universal_safe`, never to a cue-emitting mode** — a broken config must not silently start writing markup into speech. `translate.py` passes `"universal_safe"` as its `config.get` default so a config missing the key agrees with the schema.
+
+`_EMOTION_POLICIES` and `_EMOTION_SYSTEM_LINES` are parallel dicts: every key must exist in both, and `tests/test_translation_prompt.py::test_all_declared_modes_dispatch` enforces one distinct policy block per mode.
+
+### What each design choice protects
+
+- **`universal_safe` has no `[` or `<` anywhere in its text.** The test asserts this literally; keep it true when editing.
+- **`drama3` keeps the phoneme ban and the no-nesting / no-stacking bans.** Only the sound-effect ban is intentionally relaxed.
+- **Sound markers in `drama3` are strict: source-grounded only.** The model may modulate *how* a line is spoken but must not invent events or ambience. This is the `Never fabricate performance content` rule; do not soften it without the user asking.
+- **Legacy modes are frozen.** `tests/test_split_parity.py` compares `_EMOTION_POLICY_RESTRAINED/_AUTO/_EXPRESSIVE` and the three legacy `_EMOTION_SYSTEM_LINES` entries against the pre-refactor implementation. New modes must be purely additive; `test_new_models_are_purely_additive` pins the added key set to exactly `{universal_safe, drama3}`.
+
+### Paired inline tags vs. sentence splitting — CRITICAL
+
+`text_utils.split_sentences` splits on sentence-end punctuation, and each chunk becomes a **separate TTS request**. Splitting inside `<whisper>…</whisper>` would separate the halves, losing the effect or making the tag audible. Two mechanisms prevent that:
+
+1. `_tag_spans` + `_text_mask` mark every character inside a recognized paired tag as unbreakable, computed **once on the full text** so offsets stay valid across hard breaks (each break advances `start` into the same original string).
+2. `_break_position` prefers a space before the cap, then the first usable space at any later position (a longer chunk beats a broken tag), then falls back to `limit` so the caller always makes progress.
+
+Recognized tags: `whisper`, `emphasis`, `soft`, `fast`, `slow`, `stress`, `forceful`. A tag spanning a sentence end merges those sentences into one chunk by design. An unclosed tag is not special-cased — the splitter must never hang or drop text on malformed model output.
 
 ## `GENERAL_RESULT` side effects
 

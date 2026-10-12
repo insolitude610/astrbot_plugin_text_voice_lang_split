@@ -54,12 +54,63 @@ def strip_thinking(text: str) -> str:
 
 _SENTENCE_END_RE = re.compile(r"(?<=[。！？.!?…；;])(?!\d)|(?<=\n)")
 
+# Paired inline delivery tags (Fish Audio Drama 3 word-level control).
+# A split or hard break that lands inside one of these pairs separates the
+# opening and closing halves into two independent TTS requests, which loses
+# the effect or makes the tag itself audible.
+_PAIRED_TAG_RE = re.compile(
+    r"<(whisper|emphasis|soft|fast|slow|stress|forceful)>.*?</\1\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
 
-def _break_position(text: str, limit: int) -> int:
-    """Hard-break position: nearest space within 20 chars before `limit`."""
-    for i in range(limit - 1, max(0, limit - 20) - 1, -1):
-        if text[i].isspace():
-            return i + 1
+
+def _tag_spans(text: str) -> list[tuple[int, int]]:
+    """Character spans covered by paired inline tags (empty when none)."""
+    if "<" not in text:
+        return []
+    return [m.span() for m in _PAIRED_TAG_RE.finditer(text)]
+
+
+def _text_mask(text: str, spans) -> list[bool]:
+    """Per-character flag: True where a cut at this offset is allowed."""
+    mask = [True] * len(text)
+    for start, end in spans:
+        for i in range(max(0, start), min(len(text), end)):
+            mask[i] = False
+    return mask
+
+
+def _break_position(
+    text: str, mask, limit: int, offset: int, back_window: int = 20
+) -> int:
+    """Hard-break position for a segment longer than the character cap.
+
+    `text` is the buffer being split, `mask` covers the whole original text,
+    and `offset` is where `text` starts inside it. A cut is unusable when it
+    lands inside a paired inline tag, because the two halves would then be
+    synthesized as separate requests.
+
+    Search order:
+    1. nearest space within `back_window` chars before `limit`;
+    2. otherwise the first space outside every tag at any later position —
+       preferring a longer chunk over one that breaks a tag open;
+    3. otherwise, if the block contains spaces inside a tag, the first one
+       (best effort: an oversized chunk is preferable to mangled text);
+    4. otherwise the exact limit, so the caller always makes progress.
+    """
+
+    def usable(cut: int) -> bool:
+        return cut > 0 and text[cut - 1].isspace() and mask[offset + cut - 1]
+
+    for cut in range(limit, max(0, limit - back_window) - 1, -1):
+        if usable(cut):
+            return cut
+    for cut in range(limit + 1, len(text)):
+        if usable(cut):
+            return cut
+    for cut in range(1, len(text)):
+        if text[cut - 1].isspace():
+            return cut
     return limit
 
 
@@ -69,26 +120,44 @@ def split_sentences(text: str, max_chars: int = 200) -> list[str]:
     - Splits after sentence-end punctuation (。！？!?…；;\\n), keeping the
       delimiter with its sentence (language-agnostic; CJK has no spaces).
       A period followed by a digit is NOT a sentence end ("3.14" stays whole).
+    - A boundary that would fall inside a paired inline tag is not used, so
+      ``<whisper>...</whisper>`` is never cut in two. When such a tag spans a
+      sentence end, the surrounding sentences stay in one chunk.
     - ``max_chars`` > 0: a single sentence longer than the cap is hard-broken
-      at the nearest space within 20 chars before the limit (fallback: exact
-      position), so every chunk stays within the provider-friendly bound.
+      at the nearest safe space within 20 chars before the limit (fallback:
+      first safe space after it, then the exact position), so every chunk
+      stays within the provider-friendly bound.
     - ``max_chars`` == 0: sentence split only, no character cap.
     - Every sentence becomes its own voice chunk; short fragments naturally
       stay attached through the digit guard (no cross-sentence bundling).
     """
     if not text or not text.strip():
         return []
-    parts = [p for p in _SENTENCE_END_RE.split(text) if p.strip()]
-    if not parts:
-        return [text]
-    if max_chars <= 0:
-        return parts
+    # Tag spans and the safety mask are computed once on the full text;
+    # splitting always works on a suffix of it, so offsets stay valid even
+    # after hard breaks.
+    mask = _text_mask(text, _tag_spans(text))
+    boundaries: list[int] = []
+    for match in _SENTENCE_END_RE.finditer(text):
+        pos = match.end()
+        if pos < len(mask) and not mask[pos]:
+            continue
+        boundaries.append(pos)
+    boundaries.append(len(text))
+
     chunks: list[str] = []
-    for part in parts:
-        buf = part
-        while len(buf) > max_chars:
-            cut = _break_position(buf, max_chars)
-            chunks.append(buf[:cut].strip())
-            buf = buf[cut:]
-        chunks.append(buf.strip())
+    start = 0
+    for pos in boundaries:
+        while max_chars > 0 and pos - start > max_chars:
+            cut = _break_position(text[start:pos], mask, max_chars, start)
+            if cut <= 0:
+                break
+            piece = text[start : start + cut].strip()
+            if piece:
+                chunks.append(piece)
+            start += cut
+        piece = text[start:pos].strip()
+        if piece:
+            chunks.append(piece)
+        start = pos
     return chunks
