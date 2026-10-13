@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/astrbot_mute.gif" width="150" alt="astrbot娘静音">
+<img src="https://raw.githubusercontent.com/insolitude610/astrbot_plugin_text_voice_lang_split/main/assets/astrbot_mute.gif" width="150" alt="astrbot娘静音">
 
 # 文本语音语言分离 (Text-Voice Lang Split)
 
