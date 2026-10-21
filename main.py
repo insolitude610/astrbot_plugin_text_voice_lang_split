@@ -9,7 +9,18 @@ from astrbot.core.message.message_event_result import ResultContentType
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.star.session_llm_manager import SessionServiceManager
 
-from . import text_utils, voice_utils
+try:  # WebChat's special default persona; absent on some AstrBot versions.
+    from astrbot.core.astr_main_agent_resources import (
+        CHATUI_SPECIAL_DEFAULT_PERSONA_PROMPT,
+    )
+except Exception:  # pragma: no cover - older AstrBot
+    CHATUI_SPECIAL_DEFAULT_PERSONA_PROMPT = ""
+    logger.debug(
+        "[text_voice_lang_split] CHATUI_SPECIAL_DEFAULT_PERSONA_PROMPT unavailable; "
+        "the WebChat special default persona will not be injected"
+    )
+
+from . import context_utils, text_utils, voice_utils
 from .tools import VoiceTool
 
 
@@ -29,6 +40,7 @@ class TextVoiceLangSplit(Star):
         )
         self._bg_tasks: set[asyncio.Task] = set()
         self._terminated: bool = False
+        self._persona_api_warned: bool = False
         self._temp_manager = voice_utils.TempFileManager()
 
     async def initialize(self):
@@ -153,6 +165,9 @@ class TextVoiceLangSplit(Star):
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req):
+        # Capture before the streaming-patch guard: the guard returns early on
+        # later calls, and the snapshot must exist for every voice path.
+        await self._capture_translation_context(event, req)
         if getattr(event, "_tvls_stream_patched", False):
             return
         original = event.send_streaming
@@ -251,6 +266,71 @@ class TextVoiceLangSplit(Star):
         session_key = self._get_session_key(event)
         self._streaming_texts.pop(session_key, None)
         await self._maybe_send_deferred_voice(event)
+
+    async def _capture_translation_context(self, event, req) -> None:
+        """Snapshot the persona and pre-turn history for the translation prompt.
+
+        Runs inside `on_llm_request`, i.e. after the pipeline resolved the
+        conversation and applied the persona, so the snapshot matches what the
+        main LLM saw. Only the configured modes read anything; "off" is a no-op.
+        Writes are additive: an empty later capture never erases a good one.
+        """
+        mode = context_utils.normalize_context_mode(
+            self.config.get(
+                "translate_context_mode", context_utils.DEFAULT_CONTEXT_MODE
+            )
+        )
+        if mode == context_utils.DEFAULT_CONTEXT_MODE:
+            return
+
+        try:
+            messages = context_utils.extract_recent_messages(
+                getattr(req, "contexts", None)
+            )
+            if messages:
+                event.set_extra("_tvls_context_messages", messages)
+        except Exception:
+            logger.debug(
+                "[text_voice_lang_split] Failed to snapshot translation context",
+                exc_info=True,
+            )
+
+        try:
+            conversation = getattr(req, "conversation", None)
+            if conversation is None:
+                # Core applies no persona when there is no conversation.
+                return
+            resolver = getattr(
+                getattr(self.context, "persona_manager", None),
+                "resolve_selected_persona",
+                None,
+            )
+            if not callable(resolver):
+                if not self._persona_api_warned:
+                    self._persona_api_warned = True
+                    logger.warning(
+                        "[text_voice_lang_split] This AstrBot version has no "
+                        "PersonaManager.resolve_selected_persona; persona "
+                        "injection is unavailable (context injection still works)"
+                    )
+                return
+            provider_settings = self.context.get_config(event.unified_msg_origin).get(
+                "provider_settings", {}
+            )
+            persona_prompt = await context_utils.resolve_persona_prompt(
+                self.context,
+                event,
+                getattr(conversation, "persona_id", None),
+                provider_settings=provider_settings,
+                special_default_prompt=CHATUI_SPECIAL_DEFAULT_PERSONA_PROMPT,
+            )
+            if persona_prompt:
+                event.set_extra("_tvls_persona_prompt", persona_prompt)
+        except Exception:
+            logger.debug(
+                "[text_voice_lang_split] Failed to resolve the persona prompt",
+                exc_info=True,
+            )
 
     def _get_session_key(self, event: AstrMessageEvent) -> str:
         return event.unified_msg_origin

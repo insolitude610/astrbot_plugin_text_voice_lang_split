@@ -9,7 +9,7 @@ import asyncio
 
 from astrbot.api import logger
 
-from . import prompts, text_utils
+from . import context_utils, prompts, text_utils
 
 TRANSLATION_ERRORS = 0
 
@@ -34,8 +34,36 @@ async def translate_text(context, config, text, event) -> str | None:
     emotion_policy = prompts.emotion_policy_block(emotion_mode, voice_lang)
     emotion_system_line = prompts.emotion_system_line(emotion_mode)
 
+    try:
+        persona_block, context_block = context_utils.build_reference_blocks(
+            config, event
+        )
+    except Exception:
+        logger.debug(
+            "[text_voice_lang_split] Reference context unavailable; "
+            "translating without it",
+            exc_info=True,
+        )
+        persona_block, context_block = "", ""
+    if context_utils.normalize_context_mode(
+        config.get("translate_context_mode", context_utils.DEFAULT_CONTEXT_MODE)
+    ) != context_utils.DEFAULT_CONTEXT_MODE and not (persona_block or context_block):
+        logger.debug(
+            "[text_voice_lang_split] Context mode enabled but no persona or "
+            "context captured; using the plain translation prompt"
+        )
+    has_reference = bool(persona_block or context_block)
+    system_prompt = prompts.build_translation_system_prompt(
+        emotion_system_line, has_reference
+    )
+
     prompt = prompts.build_translation_prompt(
-        voice_lang, custom_instructions, emotion_policy, text
+        voice_lang,
+        custom_instructions,
+        emotion_policy,
+        text,
+        persona_block,
+        context_block,
     )
 
     provider_id = config.get("translate_provider", "").strip()
@@ -57,9 +85,7 @@ async def translate_text(context, config, text, event) -> str | None:
             coro = context.llm_generate(
                 chat_provider_id=provider_id,
                 prompt=prompt,
-                system_prompt=prompts.build_translation_system_prompt(
-                    emotion_system_line
-                ),
+                system_prompt=system_prompt,
             )
             if timeout > 0:
                 llm_resp = await asyncio.wait_for(coro, timeout=timeout)

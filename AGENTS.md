@@ -156,6 +156,41 @@ Rules that must hold:
 - A bracket that is data, not a cue (e.g. a list like `[1] 通过`), is not leading and must not be touched.
 - This runs inside `filter_text_for_tts`, i.e. **before translation**, so it acts on the LLM's raw reply.
 
+## Translation reference context (v1.12.0)
+
+`translate_context_mode` adds optional persona / recent-conversation reference blocks to the translation prompt. Default `off` keeps the prompt byte-identical; `tests/test_split_parity.py` and `tests/test_translation_context.py` both lock that.
+
+### Capture point — MUST stay in `on_llm_request`, BEFORE the stream-patch guard
+
+`_capture_translation_context` snapshots `req.contexts` and resolves the persona inside `on_llm_request`:
+
+```
+build_main_agent → collect_initial_request (req.contexts = conversation.history)
+                 → _decorate_llm_request → _ensure_persona_and_skills (persona applied)
+OnLLMRequestEvent → plugin on_llm_request (capture here)
+```
+
+Because the snapshot is taken before the runner adds the current user turn, `req.contexts` is exactly the *previous* rounds. The capture call must stay before the `_tvls_stream_patched` early return: that guard fires on repeat calls, and every voice path (non-streaming / streaming follow-up / deferred voice) reads the snapshot from the same event object.
+
+### Rules that must hold
+
+- **`_no_save` records are excluded.** Core prepends persona `begin_dialogs` to `req.contexts` as `{"role": ..., "content": ..., "_no_save": True}` (`persona_mgr.py`); treating them as real history would push real rounds out of the window. system / tool / `_checkpoint` roles and non-text content are dropped too.
+- **Persona resolution mirrors core inputs** — `umo`, `conversation.persona_id`, `platform_name`, `provider_settings` (only passed when the installed resolver accepts it, probed via `inspect.signature`). No conversation → no persona, exactly like core. WebChat special default (`resolve_selected_persona` returns persona `None`) falls back to `CHATUI_SPECIAL_DEFAULT_PERSONA_PROMPT` (imported defensively). There is no `get_default_persona_v3` fallback: substituting a persona the LLM never used is worse than injecting none.
+- **Old AstrBot:** a missing `resolve_selected_persona` logs one warning and injects no persona; only `persona_context` can still inject history, `persona` injects nothing. Never pretend persona injection worked.
+- **Third-party runners** (dify / coze / dashscope) build a bare `ProviderRequest` with no `conversation` and never populate `contexts` (`third_party.py`), so they inject nothing at all — plain translation. Only the local Agent Runner has local history.
+- **Writes are additive:** an empty later capture never clobbers a good snapshot.
+- **Fail-closed config:** unknown/empty/mistyped `translate_context_mode` → `off`; invalid rounds → 5 (clamped to 20); invalid budget → 2000 (`0` = unlimited, a positive value below `MIN_CONTEXT_CHARS=200` is raised to 200 so the tail-truncation fallback cannot emit a mid-word fragment). A broken config must never start sending persona/chat content to the translation provider.
+- **Budget:** the rendered body never exceeds `translate_context_max_chars`; oldest lines are dropped first, then the tail of a single oversized message is kept.
+- **Empty blocks must keep the legacy bytes.** `build_translation_prompt(..., persona_block="", context_block="")` and `build_translation_system_prompt(line)` are byte-identical to v1.11.0; the guard sentence and the extra system-prompt line appear only when a block is non-empty.
+
+### Pure-module boundary
+
+`context_utils.py` imports only `inspect` and `prompts` — no AstrBot — so the formatting rules are testable with plain `python`. AstrBot-facing capture lives in `main.py`; `translate.py` only calls `build_reference_blocks(config, event)` and swallows failures with a debug log.
+
+### Anti-leak posture
+
+The blocks are framed as reference data, and a guard sentence immediately before `Source text:` restates it. This is prompt-level only — it cannot be proven locally without a live provider. Do not claim it is verified; treat a leaked or answered context as a known residual risk.
+
 ## `GENERAL_RESULT` side effects
 
 Setting `result.result_content_type = ResultContentType.GENERAL_RESULT`:
@@ -217,19 +252,26 @@ Register in `initialize()` via `self.context.add_llm_tools(tool_instance)`. Regi
 
 ## Tests
 
-Three test suites, all in `tests/` (gitignored):
+Nine test suites, all in `tests/` (gitignored):
 
 ```bash
 # Run with AstrBot venv (REAL import layer, full integration):
-& "D:\AstrBotLauncher-0.1.5.5\AstrBot\venv\Scripts\python.exe" tests/test_voice_tool.py
+$py = "D:\AstrBotLauncher-0.1.5.5\AstrBot\venv\Scripts\python.exe"
+foreach ($t in @("test_translation_context.py", "test_split_parity.py",
+                 "test_translation_prompt.py", "test_phase2.py", "test_smoke.py",
+                 "test_split_and_toggle.py", "test_voice_tool.py",
+                 "test_filter_text_for_tts.py", "test_strip_thinking.py")) {
+  & $py "tests\$t"
+}
 
 # Standalone (no AstrBot deps needed, reference layer only):
+python tests/test_translation_context.py
 python tests/test_strip_thinking.py
 python tests/test_filter_text_for_tts.py
 python tests/test_voice_tool.py
 ```
 
-`test_voice_tool.py` has dual layers: reference layer (standalone) + integration layer (requires AstrBot venv, uses real imports).
+`test_voice_tool.py`, `test_translation_prompt.py`, `test_translation_context.py` and `test_strip_thinking.py` have dual layers: reference layer (standalone) + integration layer (requires AstrBot venv, uses real imports). `test_split_parity.py` needs the plugin's `v1.8.0` git tag and rewrites `tests/_ref_main_v180.py`.
 
 ## Commands
 

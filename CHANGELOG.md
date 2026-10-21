@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.12.0
+
+- **新增翻译参考注入（可选）**：`translate_context_mode` 三档下拉——`off`（默认，行为与 v1.11.0 完全一致）、`persona`（只注入人格）、`persona_context`（人格 + 最近 5 轮对话）。让译文沿用当前人格的称谓、敬语、自称、口癖与情绪强度；默认关闭，保持最快路径
+  - 新增 `translate_context_rounds`（默认 5，上限 20；1 条用户消息及其回复算 1 轮）与 `translate_context_max_chars`（默认 2000，0 = 不限；超限先丢最旧、最后兜底截尾）
+  - **历史在 `on_llm_request` 时快照**：此时 `req.contexts` 是本轮之前的对话、人格已由核心应用，因此「最近 5 轮」不会混入正在翻译的本轮回复；快照写入是加法式的，空快照不会覆盖已有快照
+  - **过滤 `_no_save` 人格开场白**：核心会把人格 `begin_dialogs`（`_no_save: True`）prepend 进 `req.contexts`，快照阶段将其排除，避免把剧本对话当成真实历史；同时过滤 system / tool / `_checkpoint` 与非文本内容，窗口 80 条以覆盖工具轮次
+  - **人格镜像核心解析**：按核心完全相同的入参（`umo` / `conversation.persona_id` / `platform_name` / `provider_settings`）调用 `PersonaManager.resolve_selected_persona`，并镜像「无 conversation 不注入人格」与 WebChat 特殊默认人格分支；不再使用可能拿到「LLM 未使用的人格」的 `get_default_persona_v3` 兜底。旧版 AstrBot 缺该 API 时**不静默**：打印一次 warning，此时 `persona_context` 只注入上下文、`persona` 模式不注入任何内容；dify / coze / dashscope 等第三方 runner 无 conversation 与本地历史，一律按纯翻译处理
+  - `translate_context_max_chars` 非零值最小按 200 生效，避免极小的预算把渲染行截成半句话；小数或非整数配置按非法值回落到默认值
+  - **提示词结构**：人格块与上下文块均为 `(REFERENCE ONLY)`，要求模型只用于风格参考、不得翻译/引用/回答/续写、不得覆盖 TTS 安全与输出格式规则、与用户翻译指令冲突时以用户指令为准；在 `Source text:` 前新增一条仅注入时出现的最近提醒；system prompt 仅在注入时追加一行参考说明
+  - **默认路径逐字节不变**：`off` 时 prompt / system prompt 与旧版本完全一致，由 `tests/test_split_parity.py` 与新测试双重锁定；新增参数均为尾部默认值，旧调用方式不受影响
+  - 新增 `context_utils.py`（纯 stdlib，无 AstrBot 依赖，可独立测试）：模式/轮数/预算归一化（非法值 fail-closed 回落到 `off` / 5 / 2000）、历史提取、轮次选择、渲染与截断、人格解析、参考块组装
+- 新增 `tests/test_translation_context.py`（46 项）：配置 fail-closed、历史过滤与 80 条窗口、轮次选择（含工具轮次与跨轮边界）、预算丢最旧/截尾与 200 字下限、参考块措辞与在 prompt 中的插入顺序、默认 prompt 与 system prompt 字节不变、`build_reference_blocks` 各模式、人格解析阶梯（含 WebChat 特殊默认与旧签名）、`on_llm_request` 快照（`_no_save` 过滤、加法写入、无 conversation/无 API 降级）、`translate_text` 接线与降级
+- 配置项 hint 说明注入成本、隐私（人格与聊天内容会发给翻译 Provider）、第三方 runner 无本地历史、人格 API 版本要求
+
 ## v1.11.0
 
 - **默认档改为无标签（`universal_safe`），并新增 Fish Audio Drama 3 专属档（`drama3`）**。`emotion_intensity` 从"情绪强度"重新定位为"标记语法家族"——四个档位写入译文的标记语法互不兼容，选错会让 TTS 把标记照字念出来

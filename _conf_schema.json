@@ -50,6 +50,30 @@
     "default": 30.0,
     "hint": "翻译 LLM 请求的最大等待时间。超时后回退为不翻译，仅发送原始文本。设置为 0 表示无超时"
   },
+  "translate_context_mode": {
+    "description": "翻译参考注入模式",
+    "type": "string",
+    "default": "off",
+    "options": ["off", "persona", "persona_context"],
+    "labels": [
+      "关闭（最快·默认）",
+      "仅注入人格",
+      "人格 + 最近 5 轮上下文（最贴情绪）"
+    ],
+    "hint": "把当前人格和/或最近几轮对话作为「只读参考」注入翻译提示词，让译文更贴人物语气与情绪。默认关闭：不注入、最快、最省 token。\n\n· 仅注入人格：只带人格提示词，译文更贴人物口吻，token 增加很少。\n· 人格 + 最近 5 轮上下文：再带上最近几轮对话，称谓、关系与情绪最连贯，但 token 与延迟最高。\n\n⚠️ 隐私：人格与聊天内容会随翻译请求发送给你配置的翻译 Provider（若它与聊天 Provider 不同，请注意这一点）。\n⚠️ 注入内容仅作风格参考，提示词会明确要求模型不得翻译/回答/续写这些内容，但该约束只能靠提示词实现，建议先小范围确认效果。\n⚠️ 人格注入需要 AstrBot 支持 PersonaManager.resolve_selected_persona。不支持的旧版本会打印一次警告，此时 persona_context 只注入上下文，persona 模式不注入任何内容。\n⚠️ 只有本地 Agent Runner 有本地对话历史；dify / coze / dashscope 等第三方 runner 不会注入任何参考（按纯翻译处理）。\n格式错误或不在列表中的值一律按「关闭」处理。"
+  },
+  "translate_context_rounds": {
+    "description": "注入的对话轮数",
+    "type": "int",
+    "default": 5,
+    "hint": "「人格 + 最近 5 轮上下文」模式下注入最近几轮对话（1 条用户消息及其回复算 1 轮），最多 20 轮。仅在 persona_context 模式生效"
+  },
+  "translate_context_max_chars": {
+    "description": "注入上下文的最大字符数",
+    "type": "int",
+    "default": 2000,
+    "hint": "注入上下文的字符上限，超出时先丢弃最旧的内容；设为 0 表示不限制。非零值最小按 200 生效（更小的值会被提升到 200，避免截出半句话）。上下文很长或翻译经常超时，可以调小此值或调大 translate_timeout"
+  },
   "tts_max_chars": {
     "description": "TTS 最大字符数限制",
     "type": "int",

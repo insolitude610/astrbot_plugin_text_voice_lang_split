@@ -24,6 +24,7 @@
 - 跨平台通用（Windows / macOS / Linux）
 - WebUI 可视化配置
 - TTS 前自动过滤不适合朗读的内容（颜文字、代码块、URL、Markdown 格式等），仅剥离视觉噪声，不做机械替换
+- **可选注入人格与最近对话上下文**：翻译时可带上人格和/或最近 5 轮对话作为只读参考，让译文更贴人物语气与情绪；默认关闭，保持最快路径
 - 自动剥离翻译 LLM 输出的思考/推理内容（`<think>...</think>` 块、` response 标记等），防止推理模型将内心独白混入语音
 - 翻译失败/超时/原文过长自动静默，不中断正常对话
 - 自动检测 Agent Live 模式并跳过插件 TTS，避免与内置分句 TTS 冲突导致 429
@@ -60,6 +61,9 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 | `emotion_intensity` | `universal_safe` | 情绪/表演标记策略，**面板里是下拉选择**。⚠️ 只有「无标记」对任意 TTS 供应商都安全，其余档位都会向译文写入标记，**只有确认你的 TTS 能解释这些标记时才可选**。<br>「无标记」`universal_safe`（默认）：纯文本，任意供应商<br>「Drama 3 导演」`drama3`：自由导演 + 音效 + 成对标签（需 `drama-3-preview`）<br>「标准情绪标签」`auto`：情绪句加一个 `[标签]`（Fish Audio S2 系）<br>「强化情绪标签」`expressive`：情绪句必加标签（Fish Audio S2 系）<br>「保守情绪标签」`restrained`：通常不加标签（Fish Audio S2 系）<br>格式错误或不在列表中的值按「无标记」处理 |
 | `translate_provider` | (空) | 翻译用 LLM Provider，留空则复用当前聊天的 Provider |
 | `translate_timeout` | `30` | 翻译请求超时(秒)，超时后自动重试一次（间隔 0.5s），设为 0 关闭超时 |
+| `translate_context_mode` | `off` | 翻译参考注入模式，**面板里是下拉选择**。`off` 关闭（默认，最快）；`persona` 仅注入人格；`persona_context` 人格 + 最近 5 轮上下文（最贴情绪，token/延迟最高）。格式错误按「关闭」处理 |
+| `translate_context_rounds` | `5` | `persona_context` 模式下注入的对话轮数（1 条用户消息及其回复算 1 轮，最多 20） |
+| `translate_context_max_chars` | `2000` | 注入上下文的字符上限，超出先丢最旧内容，最后兜底截尾；0 表示不限制 |
 | `tts_max_chars` | `0` | 过滤后的文本超过此字符数时跳过翻译和 TTS。设为 0 不限制 |
 | `remove_patterns` | (见默认值) | TTS 文本过滤正则规则。匹配到的内容在翻译前删除，用于过滤颜文字、装饰符号等视觉噪声 |
 | `streaming_follow_up_delay` | `1.5` | 流式模式下语音跟进的延迟(秒) |
@@ -103,6 +107,23 @@ Drama 3 是目前 Fish Audio 最强的表演模型，支持用自然语言"导�
 - `drama3` 档与 `split_tts_by_sentence` 同时使用时，成对标签（`<whisper>…</whisper>`）所在句不会被拆开，以保证标签闭合；单个标签长于 `tts_split_max_chars` 时按最佳努力切分
 - 若 `remove_patterns` 里保留了 `\[.*?\]` 这类规则，方括号导演标记会在翻译前被删除，Drama 3 的导演能力会失效，请按需调整
 - Drama 3 官方标注为 Preview，行为可能变化
+
+### 把人格与上下文注入翻译（可选，v1.12.0）
+
+纯直译只看到当前这一句中文，拿不到角色口吻和上一轮的情绪。打开 `translate_context_mode` 后，插件会在翻译提示词里附上**只读参考块**，让译文沿用当前的称谓、敬语等级、自称、口癖和情绪强度：
+
+| 档位 | 注入内容 | 适用场景 |
+|------|----------|----------|
+| `off`（默认） | 不注入 | 追求最快、最省 token，或不想把聊天内容发给翻译 Provider |
+| `persona` | 当前人格提示词 | 只想让人物的语气更稳定 |
+| `persona_context` | 当前人格 + 最近 5 轮对话 | 长对话、情绪起伏大，希望译文承接上一轮的语境 |
+
+- **「5 轮」的定义**：最近 5 条用户消息以及它们对应的回复（1 条用户消息 + 它的回复 = 1 轮）。历史在 **LLM 请求发出前** 快照，不包含本轮正在翻译的回复；人格开场白（`begin_dialogs`）会被排除，不会被当成真实聊天记录。
+- **预算**：`translate_context_max_chars`（默认 2000，非零值最小按 200 生效）先丢最旧内容，仍超限则保留尾部，避免把 `translate_timeout` 打爆。上下文很长或翻译经常超时，可调小轮数/预算，或调大 `translate_timeout`。
+- **隐私**：人格与聊天内容会随翻译请求发给你配置的翻译 Provider。若 `translate_provider` 与聊天 Provider 不是同一个，请确认你可以接受这些内容到达该服务商。
+- **适用范围**：只有本地 Agent Runner 才有本地对话历史，也才会注入参考内容；dify / coze / dashscope 这类第三方 runner 不提供本地上下文与 conversation，此时**不会注入任何参考**（按纯翻译处理）。人格注入还需要 AstrBot 支持 `PersonaManager.resolve_selected_persona`：不支持的旧版本会打印一次警告，此时 `persona_context` 只注入上下文，`persona` 模式不注入任何内容。
+- **防泄漏只是提示词约束**：参考块明确要求模型「不得翻译/引用/回答/续写参考内容」，并在 `Source text:` 之前再重复一次；但这是提示词层面的约束，无法离线自动验证，建议先观察几条回复。WebChat 的特殊默认人格本身带有「主动追问/总结」这类行为指令，插件的规则会把它标为仅作参考；若在 WebChat 里发现译文多出追问，建议关闭本插件或改用显式人格（另见上文不建议 Live Chat 的说明）。
+- **默认零变化**：`off` 时翻译提示词与 system prompt 与旧版本**逐字节一致**，行为、速度、token 都不变。
 
 ### 减少翻译超时
 
