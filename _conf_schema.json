@@ -78,7 +78,7 @@
     "description": "TTS 最大字符数限制",
     "type": "int",
     "default": 0,
-    "hint": "过滤后的文本超过此字符数时跳过翻译和 TTS 生成，仅发送文字。设为 0 表示不限制"
+    "hint": "语音朗读的是本回合用户**实际收到**的可朗读文本（多步工具回合会累加）；超过此值则跳过语音，并在日志里记一条 WARNING（不再静默）。设为 0 表示不限制。\n\n注意「已送达」的排除项（这些文本插件看不到，或看着了也已不投入音频）：tool_direct_result 直发的消息、平台侧丢弃的消息、platform_settings.forward_threshold 触发的转发包装（长文本会变成合并转发节点，插件侧读不到纯文本）、以及开启「输出工具调用信息」时由核心在工具循环内直发的工具状态消息。\n\n内联路径（enable_llm_voice_tool 关闭）仍在装饰阶段取文本，此时读到的是其它插件清洗**之前**的内容；若你同时使用思考标签清理类插件，建议改用工具模式，或把对应清洗正则补进 remove_patterns。"
   },
   "tts_concurrency": {
     "description": "并发翻译与语音合成上限",
@@ -102,7 +102,7 @@
     "description": "LLM 自主判断是否发送语音",
     "type": "bool",
     "default": false,
-    "hint": "开启后插件会注册语音工具 (tvls_send_voice)，由 LLM 自行判断当前回复是否需要朗读。关闭时保持默认行为：每条消息都生成语音"
+    "hint": "开启后插件注册语音工具 (tvls_send_voice)，由 LLM 自行判断当前回复是否需要朗读。\n\n行为：装饰阶段只发文字（并阻断内置 TTS，避免同一句话被读两遍），语音在**本回合最后一条文字真正发出之后**作为独立跟进消息发送；工具本身只记录请求，不会承诺送达——超限、TTS 不可用、开关关闭时会在日志里留 WARNING。\n\n消息条数：插件不合并也不删除 AstrBot 投递的消息。默认配置下，工具调用前的那条回复与工具后的消息是两条独立消息；想要「一回合一条」请开启 AstrBot 的 provider_settings.buffer_intermediate_messages（合并 Agent 中间消息，仅非流式）。\n\n关闭时保持默认行为：每条消息都内联生成语音。"
   },
   "remove_patterns": {
     "description": "TTS 文本过滤正则规则",

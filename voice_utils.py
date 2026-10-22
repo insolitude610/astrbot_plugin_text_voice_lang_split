@@ -7,6 +7,7 @@ functions with explicit dependency injection (context, config, event).
 import asyncio
 import os
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 from astrbot.api import logger, sp
 from astrbot.api.event import MessageChain
@@ -16,6 +17,87 @@ from astrbot.core.star.session_llm_manager import SessionServiceManager
 from . import text_utils, translate
 
 TVLS_ENABLED_KEY = "tvls_enabled"
+
+# Voice gate verdicts. Every voice consumer (tool, turn-end service, streaming
+# follow-up, inline path) must go through these so the promise a caller makes
+# and the check a sender performs can never drift apart again.
+VOICE_GATE_OK = "ok"
+VOICE_GATE_EMPTY = "empty"
+VOICE_GATE_TOO_LONG = "too_long"
+VOICE_GATE_DISABLED = "disabled"
+VOICE_GATE_NO_PROVIDER = "no_provider"
+VOICE_GATE_SESSION_TTS_OFF = "session_tts_off"
+VOICE_GATE_TTS_OFF = "tts_off"
+
+
+@dataclass(frozen=True)
+class VoiceGate:
+    """Outcome of a voice eligibility check.
+
+    ``ok`` False always carries a ``reason`` and is safe to log verbatim; the
+    caller decides the user-facing wording (the tool answers the model, the
+    sender logs for the operator).
+    """
+
+    ok: bool
+    reason: str
+    text: str = ""
+    length: int = 0
+    max_chars: int = 0
+
+
+def coerce_max_chars(value) -> int:
+    """Normalize a configured cap; anything unusable means "no limit" (0)."""
+    try:
+        cap = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return cap if cap > 0 else 0
+
+
+def voice_gate_text(text, config, filter_patterns) -> VoiceGate:
+    """Decide whether `text` is speakable: filter, then emptiness, then cap.
+
+    Semantics are deliberately identical to the pre-refactor checks in
+    main.py/voice_utils.py: the cap compares the UNstripped filtered length,
+    and fewer than 2 stripped characters counts as nothing to say.
+    """
+    filtered = text_utils.filter_text_for_tts(text or "", filter_patterns)
+    max_chars = coerce_max_chars(config.get("tts_max_chars", 0))
+    length = len(filtered)
+    if len(filtered.strip()) < 2:
+        return VoiceGate(False, VOICE_GATE_EMPTY, filtered, length, max_chars)
+    if max_chars > 0 and length > max_chars:
+        return VoiceGate(False, VOICE_GATE_TOO_LONG, filtered, length, max_chars)
+    return VoiceGate(True, VOICE_GATE_OK, filtered, length, max_chars)
+
+
+async def voice_gate_env(context, config, event, tts_provider=None) -> VoiceGate:
+    """Decide whether the environment can produce a voice right now.
+
+    Fail-closed: a broken integration check must never lead to a voice that
+    the rest of the pipeline cannot justify.
+    """
+    try:
+        if not await is_tvls_enabled(event):
+            return VoiceGate(False, VOICE_GATE_DISABLED)
+        if tts_provider is None:
+            tts_provider = context.get_using_tts_provider(event.unified_msg_origin)
+        if not tts_provider:
+            return VoiceGate(False, VOICE_GATE_NO_PROVIDER)
+        if not await SessionServiceManager.should_process_tts_request(event):
+            return VoiceGate(False, VOICE_GATE_SESSION_TTS_OFF)
+        provider_config = context.get_config(event.unified_msg_origin)
+        if not provider_config.get("provider_tts_settings", {}).get("enable", False):
+            return VoiceGate(False, VOICE_GATE_TTS_OFF)
+    except Exception:
+        logger.warning(
+            "[text_voice_lang_split] Voice availability check failed; treating "
+            "the voice as unavailable",
+            exc_info=True,
+        )
+        return VoiceGate(False, VOICE_GATE_NO_PROVIDER)
+    return VoiceGate(True, VOICE_GATE_OK)
 
 
 async def is_tvls_enabled(event) -> bool:
@@ -149,13 +231,27 @@ async def send_streaming_follow_up(
     streaming_texts: dict,
     filter_patterns,
     semaphore,
+    stream_ok: bool = True,
 ) -> None:
     """Translate + TTS the accumulated streaming text and send as follow-up.
 
     Called from the patched send_streaming wrapper AFTER the text stream
     finishes. Awaited inside RespondStage, so it completes before the
     pipeline-end temporary file cleanup (safe to track files on the event).
+
+    `stream_ok` reports whether the text stream itself completed. A failed
+    stream means the user never received the text, so voicing it would speak
+    content the user never saw: log and consume the turn's request instead.
     """
+    if not stream_ok:
+        logger.warning(
+            "[text_voice_lang_split] Text stream failed; skipping the streaming "
+            "voice (the user never received this text)"
+        )
+        event.set_extra("_tvls_deferred_voice_sent", True)
+        streaming_texts.pop(session_key, None)
+        return
+
     if event.get_extra("action_type") == "live":
         logger.info(
             "[text_voice_lang_split] Agent live mode detected, "
@@ -177,39 +273,21 @@ async def send_streaming_follow_up(
             )
             streaming_texts.pop(session_key, None)
             return
-
     accumulated = streaming_texts.pop(session_key, None)
     if accumulated is None:
         return
 
-    if not accumulated.strip() or len(accumulated.strip()) < 2:
-        return
-
     tts_provider = context.get_using_tts_provider(event.unified_msg_origin)
-    if not tts_provider:
+    env = await voice_gate_env(context, config, event, tts_provider)
+    if not env.ok:
+        logger.debug(f"[text_voice_lang_split] Streaming voice skipped ({env.reason})")
         return
 
-    if not await SessionServiceManager.should_process_tts_request(event):
-        logger.debug("[text_voice_lang_split] TTS disabled for session, skip")
-        return
-
-    provider_config = context.get_config(event.unified_msg_origin)
-    if not provider_config.get("provider_tts_settings", {}).get("enable", False):
-        logger.debug("[text_voice_lang_split] TTS globally disabled, skip")
-        return
-
-    filtered_text = text_utils.filter_text_for_tts(accumulated, filter_patterns)
-    if len(filtered_text.strip()) < 2:
-        logger.info(
-            "[text_voice_lang_split] Nothing speakable after filtering, skip streaming TTS"
-        )
-        return
-
-    max_chars = config.get("tts_max_chars", 0)
-    if max_chars > 0 and len(filtered_text) > max_chars:
-        logger.info(
-            f"[text_voice_lang_split] Filtered text ({len(filtered_text)} chars) "
-            f"exceeds max ({max_chars}), skip TTS"
+    gate = voice_gate_text(accumulated, config, filter_patterns)
+    if not gate.ok:
+        logger.warning(
+            f"[text_voice_lang_split] Streaming voice skipped "
+            f"({gate.reason}: {gate.length}/{gate.max_chars} chars)"
         )
         return
 
@@ -218,10 +296,13 @@ async def send_streaming_follow_up(
     )
 
     voice = await produce_voice_paths(
-        context, config, event, filtered_text, tts_provider, semaphore
+        context, config, event, gate.text, tts_provider, semaphore
     )
     if voice is None:
-        logger.info("[text_voice_lang_split] Streaming translation failed, text only")
+        logger.warning(
+            "[text_voice_lang_split] Streaming translation/TTS failed; "
+            "text delivered without a voice"
+        )
         return
 
     for path, _ in voice:
@@ -230,52 +311,46 @@ async def send_streaming_follow_up(
     delay = config.get("streaming_follow_up_delay", 1.5)
     await asyncio.sleep(delay)
 
-    for path, chunk_text in voice:
-        chain = MessageChain()
-        chain.chain = [Record(file=path, url=path, text=chunk_text)]
-        try:
+    try:
+        for path, chunk_text in voice:
+            chain = MessageChain()
+            chain.chain = [Record(file=path, url=path, text=chunk_text)]
             await context.send_message(event.unified_msg_origin, chain)
-        except Exception:
-            logger.error(
-                "[text_voice_lang_split] Failed to send streaming voice follow-up",
-                exc_info=True,
-            )
-            return
+    except Exception:
+        logger.error(
+            "[text_voice_lang_split] Failed to send streaming voice follow-up",
+            exc_info=True,
+        )
+        logger.warning(
+            "[text_voice_lang_split] Streaming voice was only partially sent; "
+            "the request is not marked as delivered"
+        )
+        return
 
+    event.set_extra("_tvls_deferred_voice_sent", True)
     logger.info("[text_voice_lang_split] Streaming voice sent as follow-up")
 
 
 async def send_deferred_voice(
     context, config, event, text: str, semaphore, temp_manager: TempFileManager
 ) -> None:
-    """Translate + TTS + send a deferred voice message as an independent follow-up.
+    """Translate + TTS + send the turn's voice message as an independent follow-up.
 
-    Spawned via asyncio.create_task from `_maybe_send_deferred_voice`. Runs
+    Spawned via asyncio.create_task from the plugin's turn-end service. Runs
     concurrently with the rest of the pipeline — it must NOT rely on
     event.track_temporary_local_file (pipeline-end cleanup races with it);
     temp files are tracked via `temp_manager` and released after send.
+
+    `text` has already passed `voice_gate_text` in the caller; the
+    availability checks are repeated here as defence in depth, and every
+    failure is logged at WARNING so a requested voice is never lost silently.
     """
     tts_provider = context.get_using_tts_provider(event.unified_msg_origin)
-    if not tts_provider:
-        logger.debug("[text_voice_lang_split] No TTS provider for deferred voice, skip")
-        return
-
-    if not await SessionServiceManager.should_process_tts_request(event):
-        logger.debug(
-            "[text_voice_lang_split] TTS disabled for session, skip deferred voice"
-        )
-        return
-
-    provider_config = context.get_config(event.unified_msg_origin)
-    if not provider_config.get("provider_tts_settings", {}).get("enable", False):
-        logger.debug(
-            "[text_voice_lang_split] TTS globally disabled, skip deferred voice"
-        )
-        return
-
-    if not await is_tvls_enabled(event):
-        logger.debug(
-            "[text_voice_lang_split] Voice disabled for session, skip deferred voice"
+    env = await voice_gate_env(context, config, event, tts_provider)
+    if not env.ok:
+        logger.warning(
+            f"[text_voice_lang_split] Deferred voice NOT sent ({env.reason}); "
+            "the reply was delivered without a voice"
         )
         return
 
@@ -283,7 +358,10 @@ async def send_deferred_voice(
         context, config, event, text, tts_provider, semaphore
     )
     if voice is None:
-        logger.info("[text_voice_lang_split] Deferred voice translation failed")
+        logger.warning(
+            "[text_voice_lang_split] Deferred voice translation/TTS failed; "
+            "the reply was delivered without a voice"
+        )
         return
 
     for path, _ in voice:
@@ -299,6 +377,7 @@ async def send_deferred_voice(
             "[text_voice_lang_split] Failed to send deferred voice",
             exc_info=True,
         )
+        logger.warning("[text_voice_lang_split] Deferred voice was only partially sent")
     else:
         logger.info("[text_voice_lang_split] Deferred voice sent as follow-up")
     finally:

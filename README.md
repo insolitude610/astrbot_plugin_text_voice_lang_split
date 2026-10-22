@@ -64,14 +64,24 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 | `translate_context_mode` | `off` | 翻译参考注入模式，**面板里是下拉选择**。`off` 关闭（默认，最快）；`persona` 仅注入人格；`persona_context` 人格 + 最近 5 轮上下文（最贴情绪，token/延迟最高）。格式错误按「关闭」处理 |
 | `translate_context_rounds` | `5` | `persona_context` 模式下注入的对话轮数（1 条用户消息及其回复算 1 轮，最多 20） |
 | `translate_context_max_chars` | `2000` | 注入上下文的字符上限，超出先丢最旧内容，最后兜底截尾；0 表示不限制 |
-| `tts_max_chars` | `0` | 过滤后的文本超过此字符数时跳过翻译和 TTS。设为 0 不限制 |
+| `tts_max_chars` | `0` | 语音朗读的是**本回合用户实际收到的**可朗读文本，超过此值则跳过语音并记 WARNING（多步工具回合会累加）。0 表示不限制 |
 | `remove_patterns` | (见默认值) | TTS 文本过滤正则规则。匹配到的内容在翻译前删除，用于过滤颜文字、装饰符号等视觉噪声 |
-| `streaming_follow_up_delay` | `1.5` | 流式模式下语音跟进的延迟(秒) |
-| `enable_llm_voice_tool` | `false` | LLM 自主判断是否发送语音。开启后注册 `tvls_send_voice` 工具，LLM 自行决定是否朗读当前回复 |
+| `streaming_follow_up_delay` | `1.5` | 语音跟进的延迟(秒)：流式发送完毕后、以及工具模式下最后一条文字发出后，等待此时间再发语音 |
+| `enable_llm_voice_tool` | `false` | LLM 自主判断是否发送语音。开启后注册 `tvls_send_voice` 工具；语音在**本回合最后一条文字真正发出后**作为跟进消息发送 |
 
 **Provider 优先级：** `translate_provider`（手动指定）> 聊天 `/provider` 切换 > 默认 Provider。
 
-**失败回退：** 翻译超时或报错 → 静默不发语音；过滤后文本超 `tts_max_chars` → 静默不发语音；过滤后无内容 → 静默不发语音。
+**失败回退：** 翻译超时或报错 → 不发语音；过滤后文本超 `tts_max_chars` → 不发语音；过滤后无内容 → 不发语音。三种情况都会在日志里留下记录（超限与工具请求未送达是 `WARNING`），不再静默。
+
+### 语音契约与消息条数
+
+工具模式（`enable_llm_voice_tool=true`）下的行为，请按这份契约理解：
+
+1. **工具不承诺送达。** `tvls_send_voice` 只记录"本轮想要语音"；它运行在回复产生**之前**，无法预知最终长度。工具只在两种确定的情况下拒绝：语音环境不可用（会话开关关闭 / 无 TTS Provider / 全局 TTS 关闭 / 会话 TTS 被关），或**已经送达**的文本已超上限。其余情况返回"请求已记录"。
+2. **只有一个语音来源。** 装饰阶段只发文字，并设 `GENERAL_RESULT` 阻断内置 TTS，所以同一句话不会被读两遍。语音在回合最后一条文字真正投递后（`after_message_sent`）才生成，朗读的是**本回合累计投递的文本**（多步工具回合会把前后几条文字合成一次朗读，cap 也按累计计），超限则跳过并记 `WARNING`。
+3. **插件不合并、不删除消息。** 默认配置（`buffer_intermediate_messages=false`）下，AstrBot 会把工具调用前的回复和工具后的消息投递成**两条**独立消息，插件无法合并。想要"一回合一条文字 + 至多一条语音"，请开启 AstrBot → Provider 设置 → **合并 Agent 中间消息**（`buffer_intermediate_messages`，仅非流式）。
+4. **已知排除项**（插件看不到或不会朗读的文本）：`tool_direct_result` 直发的消息、平台侧丢弃的消息、`platform_settings.forward_threshold` 过长触发的**合并转发**（链里没有纯文本）、以及开启「输出工具调用信息」时核心直发的工具状态消息。
+5. **内联路径（工具关闭）** 仍在装饰阶段取文本，读到的是其它插件清洗**之前**的内容。若你同时使用思考标签清理类插件，建议改用工具模式，或把对应正则补进 `remove_patterns`。
 
 ### 情绪标记档位怎么选
 
@@ -141,11 +151,11 @@ Drama 3 是目前 Fish Audio 最强的表演模型，支持用自然语言"导�
 
 ## 原理
 
-**非流式模式：** 在消息装饰阶段（`on_decorating_result`）拦截 LLM 的文本结果 → 过滤颜文字/代码块/URL 等视觉噪声 → 调用 LLM 翻译清洁文本（按 `emotion_intensity` 档位决定是否写入情绪/表演标记）→ 剥离翻译输出中的思考/推理产物 → 调用 TTS Provider 生成语音 → 重组消息链为 `[原文文本] + [目标语言语音]`，阻止内置 TTS 重复触发。
+**非流式模式（工具关闭）：** 在消息装饰阶段（`on_decorating_result`）拦截 LLM 的文本结果 → 过滤颜文字/代码块/URL 等视觉噪声 → 调用 LLM 翻译清洁文本（按 `emotion_intensity` 档位决定是否写入情绪/表演标记）→ 剥离翻译输出中的思考/推理产物 → 调用 TTS Provider 生成语音 → 重组消息链为 `[原文文本] + [目标语言语音]`，阻止内置 TTS 重复触发。
 
-**流式模式：** 在 `on_llm_response` 捕获 LLM 完整响应文本，并用 async generator wrapper 注入流式发送 → 流式文本全部发送完毕后自动翻译 + TTS 生成语音跟进。不依赖 `after_message_sent`（AstrBot 的 RespondStage 对 `STREAMING_RESULT` 提前 return，该钩子不会触发）。
+**流式模式：** 在 `on_llm_response` 捕获 LLM 完整响应文本，并用 async generator wrapper 注入流式发送 → 流式文本全部发送完毕后自动翻译 + TTS 生成语音跟进。不依赖 `after_message_sent`（AstrBot 的 RespondStage 对 `STREAMING_RESULT` 提前 return，该钩子不会触发）。文本流本身失败时不会朗读（用户没收到那段文字），并记 `WARNING`。
 
-**LLM 自主判断语音：** 开启 `enable_llm_voice_tool` 后，插件注册 `tvls_send_voice` 函数工具。LLM 在生成回复时可以调用该工具来标记"此回复需要语音"。工具本身只设置事件标记，实际的翻译+TTS 仍在 pipeline 后续阶段执行。LLM 未调用工具时则跳过语音，仅发送文字。这允许 LLM 根据对话语境自行判断——闲聊、情感交流时发语音，代码、列表、表格时跳过。
+**LLM 自主判断语音（工具模式）：** 开启 `enable_llm_voice_tool` 后注册 `tvls_send_voice`。装饰阶段**只发文字**并阻断内置 TTS（同一句话不会被读两遍）；工具只记录请求；`on_llm_response` 标记"最终响应已产生"，随后那条消息的 `after_message_sent` 里按**已实际投递的整回合文本**做闸门判定并生成语音跟进。LLM 未调用工具则整轮不发语音。详见上文「语音契约与消息条数」。
 
 ## 作者的话
 

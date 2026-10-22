@@ -22,9 +22,19 @@ except Exception:  # pragma: no cover - older AstrBot
 
 from . import context_utils, text_utils, voice_utils
 from .tools import VoiceTool
+from .tools.voice_tool import build_description
 
 
 class TextVoiceLangSplit(Star):
+    """Translate LLM text before TTS so display and speech use different languages.
+
+    Voice tool mode (`enable_llm_voice_tool`) has exactly one voice owner: the
+    turn-end service, which runs after the turn's last message has actually
+    been delivered. The tool itself only records a request — it runs before
+    the reply exists, so it cannot decide the length question (see
+    `voice_utils.voice_gate_text`).
+    """
+
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
@@ -49,7 +59,98 @@ class TextVoiceLangSplit(Star):
         if self._voice_tool is None:
             self._voice_tool = VoiceTool(plugin=self)
         self._voice_tool.active = self.config.get("enable_llm_voice_tool", False)
+        max_chars = voice_utils.coerce_max_chars(self.config.get("tts_max_chars", 0))
+        # The description is read when AstrBot builds the request, so assigning
+        # it here keeps the model's guidance in sync with the live config.
+        self._voice_tool.description = build_description(max_chars)
         self.context.add_llm_tools(self._voice_tool)
+        if self._voice_tool.active:
+            logger.info(
+                "[text_voice_lang_split] Voice tool enabled; voice follows the "
+                f"turn's delivered text (max_chars={max_chars or 'unlimited'})"
+            )
+
+    # ── turn state ────────────────────────────────────────────────────
+
+    def _get_session_key(self, event: AstrMessageEvent) -> str:
+        return event.unified_msg_origin
+
+    def _reset_turn_state(self, event: AstrMessageEvent) -> None:
+        """Clear per-turn voice state; warn if the previous turn left a request.
+
+        `on_llm_request` fires once per turn, so this is the only safe place to
+        forget state: a follow-up turn can reuse the same event object.
+        """
+        if event.get_extra("_tvls_voice_requested", False) and not event.get_extra(
+            "_tvls_deferred_voice_sent", False
+        ):
+            logger.warning(
+                "[text_voice_lang_split] A voice requested in the previous turn "
+                "was never delivered (the final message was not sent)"
+            )
+        for key in (
+            "_tvls_decorated",
+            "_tvls_pipeline_delivered",
+            "_tvls_final_seen",
+            "_tvls_voice_requested",
+            "_tvls_deferred_voice_sent",
+        ):
+            event.set_extra(key, None)
+
+    def _record_delivered_text(self, event: AstrMessageEvent) -> None:
+        """Accumulate the text of the message that was just shipped.
+
+        Called from `after_message_sent`, where `event.get_result()` is still
+        the chain RespondStage delivered (it is cleared right after the hook),
+        so sibling plugins' rewrites are already applied. A per-result marker
+        makes a duplicated hook firing harmless without relying on `id()`.
+        """
+        result = event.get_result()
+        if result is None or getattr(result, "_tvls_confirmed", False):
+            return
+        try:
+            plain = [
+                comp.text
+                for comp in result.chain
+                if isinstance(comp, Plain) and comp.text and comp.text.strip()
+            ]
+        except Exception:
+            plain = []
+        if plain:
+            recorded = list(event.get_extra("_tvls_pipeline_delivered", None) or [])
+            recorded.append(" ".join(text.strip() for text in plain))
+            event.set_extra("_tvls_pipeline_delivered", recorded)
+        try:
+            result._tvls_confirmed = True
+        except Exception:  # pragma: no cover - exotic result object
+            logger.debug(
+                "[text_voice_lang_split] Could not mark the result as recorded"
+            )
+
+    def delivered_voice_text(self, event: AstrMessageEvent) -> str:
+        """The text a voice for this turn would speak, from ONE authority.
+
+        Preference order matters: the decorated, shipped chain is what the user
+        read in the conversation. `send_message_to_user` text is used only when
+        the turn shipped no decorated text at all — concatenating the two would
+        voice content the user never received as a single message.
+        """
+        recorded = event.get_extra("_tvls_pipeline_delivered", None) or []
+        if isinstance(recorded, list) and recorded:
+            return " ".join(str(t).strip() for t in recorded if str(t).strip())
+        sent = (
+            event.get_extra("_send_message_to_user_current_session_plain_texts", None)
+            or []
+        )
+        if not isinstance(sent, list):
+            return ""
+        return " ".join(str(t).strip() for t in sent if str(t).strip()).strip()
+
+    def voice_gate_for_text(self, text: str) -> voice_utils.VoiceGate:
+        """Gate helper shared by the tool and the turn-end service."""
+        return voice_utils.voice_gate_text(text, self.config, self._filter_patterns)
+
+    # ── pipeline hooks ────────────────────────────────────────────────
 
     @filter.on_decorating_result(priority=999)
     async def on_decorating_result(self, event: AstrMessageEvent):
@@ -67,10 +168,15 @@ class TextVoiceLangSplit(Star):
         if event.get_extra("action_type") == "live":
             return
 
+        tool_mode = bool(self.config.get("enable_llm_voice_tool", False))
+
+        # The tool-loop delivers the assistant text of every step separately.
+        # Only the first one carries the reply; later ones are handled by the
+        # turn-end service. Neither may keep the built-in TTS enabled.
         if event.get_extra("_tvls_decorated", False):
-            await self._maybe_send_deferred_voice(event)
             result.result_content_type = ResultContentType.GENERAL_RESULT
             result.use_t2i_ = False
+            self._streaming_texts.pop(self._get_session_key(event), None)
             return
 
         tts_provider = self.context.get_using_tts_provider(event.unified_msg_origin)
@@ -103,38 +209,31 @@ class TextVoiceLangSplit(Star):
             result.use_t2i_ = False
             return
 
-        filtered_text = text_utils.filter_text_for_tts(full_text, self._filter_patterns)
-        if len(filtered_text.strip()) < 2:
+        gate = voice_utils.voice_gate_text(
+            full_text, self.config, self._filter_patterns
+        )
+        if not gate.ok:
             logger.info(
-                "[text_voice_lang_split] Nothing speakable after filtering, skip TTS"
+                "[text_voice_lang_split] No voice for this message "
+                f"({gate.reason}: {gate.length}/{gate.max_chars} chars)"
             )
             result.result_content_type = ResultContentType.GENERAL_RESULT
             result.use_t2i_ = False
             self._streaming_texts.pop(self._get_session_key(event), None)
             return
 
-        max_chars = self.config.get("tts_max_chars", 0)
-        if max_chars > 0 and len(filtered_text) > max_chars:
-            logger.info(
-                f"[text_voice_lang_split] Filtered text ({len(filtered_text)} chars) "
-                f"exceeds max ({max_chars}), skip TTS"
+        if tool_mode:
+            # Text only here; the voice is produced once, after the whole turn
+            # has been delivered. GENERAL_RESULT also blocks the built-in TTS,
+            # so the plugin stays the only source of audio for this message.
+            logger.debug(
+                "[text_voice_lang_split] Voice tool mode: delivering text only; "
+                "the voice is serviced at turn end"
             )
             result.result_content_type = ResultContentType.GENERAL_RESULT
             result.use_t2i_ = False
             self._streaming_texts.pop(self._get_session_key(event), None)
             return
-
-        if self.config.get("enable_llm_voice_tool", False):
-            if not event.get_extra("_tvls_voice_requested", False):
-                logger.debug(
-                    "[text_voice_lang_split] Voice tool enabled but LLM did not "
-                    "request voice, storing pending voice"
-                )
-                event.set_extra("_tvls_pending_text", filtered_text)
-                result.result_content_type = ResultContentType.GENERAL_RESULT
-                result.use_t2i_ = False
-                self._streaming_texts.pop(self._get_session_key(event), None)
-                return
 
         logger.info(f"[text_voice_lang_split] Translating: '{full_text[:50]}...'")
 
@@ -142,7 +241,7 @@ class TextVoiceLangSplit(Star):
             self.context,
             self.config,
             event,
-            filtered_text,
+            gate.text,
             tts_provider,
             self._tts_semaphore,
         )
@@ -165,6 +264,7 @@ class TextVoiceLangSplit(Star):
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req):
+        self._reset_turn_state(event)
         # Capture before the streaming-patch guard: the guard returns early on
         # later calls, and the snapshot must exist for every voice path.
         await self._capture_translation_context(event, req)
@@ -173,8 +273,10 @@ class TextVoiceLangSplit(Star):
         original = event.send_streaming
 
         async def _patched(stream, *args, **kwargs):
+            stream_ok = False
             try:
                 await original(stream, *args, **kwargs)
+                stream_ok = True
             finally:
                 await voice_utils.send_streaming_follow_up(
                     self.context,
@@ -184,21 +286,106 @@ class TextVoiceLangSplit(Star):
                     self._streaming_texts,
                     self._filter_patterns,
                     self._tts_semaphore,
+                    stream_ok=stream_ok,
                 )
 
         event.send_streaming = _patched
         event._tvls_stream_patched = True
 
-    @filter.on_llm_response()
+    @filter.on_llm_response(priority=-1000)
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
+        # -1000 so this observes text after sibling handlers (e.g. thinking-tag
+        # stripping plugins) have rewritten the response.
         text = resp.completion_text
         if not text and resp.result_chain:
             text = resp.result_chain.get_plain_text()
-        if not text:
-            return
+        text = text or ""
 
         session_key = self._get_session_key(event)
         self._streaming_texts[session_key] = text
+
+        if not self.config.get("enable_llm_voice_tool", False):
+            return
+
+        # `on_llm_response` fires once, when the agent produced its final
+        # response. From here on, the next delivered message is the turn's last
+        # one — which is where the voice is serviced. A final response with no
+        # text will never be delivered, so service immediately.
+        event.set_extra("_tvls_final_seen", True)
+        if not text.strip():
+            await self._maybe_send_turn_voice(event)
+
+    @filter.after_message_sent(priority=999)
+    async def after_message_sent(self, event: AstrMessageEvent):
+        self._record_delivered_text(event)
+        self._streaming_texts.pop(self._get_session_key(event), None)
+        if event.get_extra("_tvls_final_seen", False):
+            await self._maybe_send_turn_voice(event)
+
+    async def _maybe_send_turn_voice(self, event: AstrMessageEvent) -> None:
+        """Send the turn's voice once, after the turn's text has been delivered.
+
+        Every exit either spawns a voice or logs a WARNING with the reason, so
+        a requested voice can never disappear silently.
+        """
+        if not self.config.get("enable_llm_voice_tool", False):
+            return
+        if event.get_extra("_tvls_deferred_voice_sent", False):
+            return
+        if not event.get_extra("_tvls_voice_requested", False):
+            return
+
+        event.set_extra("_tvls_deferred_voice_sent", True)
+
+        text = self.delivered_voice_text(event)
+        if not text:
+            logger.warning(
+                "[text_voice_lang_split] Voice requested but no delivered text "
+                "was recorded; no voice sent"
+            )
+            return
+
+        try:
+            env = await voice_utils.voice_gate_env(self.context, self.config, event)
+            if not env.ok:
+                logger.warning(
+                    "[text_voice_lang_split] Voice requested but not sent "
+                    f"({env.reason})"
+                )
+                return
+            gate = self.voice_gate_for_text(text)
+            if not gate.ok:
+                logger.warning(
+                    "[text_voice_lang_split] Voice requested but not sent "
+                    f"({gate.reason}: {gate.length}/{gate.max_chars} chars)"
+                )
+                return
+            self._spawn_voice_task(
+                voice_utils.send_deferred_voice(
+                    self.context,
+                    self.config,
+                    event,
+                    gate.text,
+                    self._tts_semaphore,
+                    self._temp_manager,
+                )
+            )
+        except Exception:
+            logger.warning(
+                "[text_voice_lang_split] Voice service failed", exc_info=True
+            )
+
+    def _spawn_voice_task(self, coro) -> asyncio.Task | None:
+        """Register a background voice task; refuse after termination begins."""
+        if self._terminated:
+            logger.warning(
+                "[text_voice_lang_split] Plugin terminating, voice request dropped"
+            )
+            return None
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(
@@ -219,53 +406,6 @@ class TextVoiceLangSplit(Star):
             f"本会话文本-语音分离状态：{'开启' if enabled else '关闭'}\n"
             f"用法：/tvls on|off（管理员）"
         )
-
-    async def _maybe_send_deferred_voice(self, event: AstrMessageEvent) -> None:
-        if not self.config.get("enable_llm_voice_tool", False):
-            return
-        if not await voice_utils.is_tvls_enabled(event):
-            return
-        if not event.get_extra("_tvls_voice_requested", False):
-            return
-        pending = event.get_extra("_tvls_pending_text", None)
-        if not pending:
-            return
-        if event.get_extra("_tvls_deferred_voice_sent", False):
-            return
-        event.set_extra("_tvls_deferred_voice_sent", True)
-        event.clear_extra("_tvls_pending_text")
-        logger.info(
-            "[text_voice_lang_split] Deferred voice triggered "
-            f"(pending text: '{pending[:50]}...')"
-        )
-        self._spawn_voice_task(
-            voice_utils.send_deferred_voice(
-                self.context,
-                self.config,
-                event,
-                pending,
-                self._tts_semaphore,
-                self._temp_manager,
-            )
-        )
-
-    def _spawn_voice_task(self, coro) -> asyncio.Task | None:
-        """Register a background voice task; refuse after termination begins."""
-        if self._terminated:
-            logger.debug(
-                "[text_voice_lang_split] Plugin terminating, refuse to spawn voice task"
-            )
-            return None
-        task = asyncio.create_task(coro)
-        self._bg_tasks.add(task)
-        task.add_done_callback(self._bg_tasks.discard)
-        return task
-
-    @filter.after_message_sent(priority=999)
-    async def after_message_sent(self, event: AstrMessageEvent):
-        session_key = self._get_session_key(event)
-        self._streaming_texts.pop(session_key, None)
-        await self._maybe_send_deferred_voice(event)
 
     async def _capture_translation_context(self, event, req) -> None:
         """Snapshot the persona and pre-turn history for the translation prompt.
@@ -331,9 +471,6 @@ class TextVoiceLangSplit(Star):
                 "[text_voice_lang_split] Failed to resolve the persona prompt",
                 exc_info=True,
             )
-
-    def _get_session_key(self, event: AstrMessageEvent) -> str:
-        return event.unified_msg_origin
 
     async def terminate(self):
         logger.info("[text_voice_lang_split] Plugin terminated")

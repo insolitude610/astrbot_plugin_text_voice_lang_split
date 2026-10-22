@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.13.0
+
+- **修复：工具请求语音后永远收不到（线上 P0）**。`main.py` 里 `event.clear_extra("_tvls_pending_text")` 与实际签名不符——`AstrMessageEvent.clear_extra(self)` **不接受参数**（它清空全部 extras），该调用必然抛 `TypeError`，而它位于 `_tvls_deferred_voice_sent = True` **之后**、任务创建之前，异常又被事件钩子封装吞掉。结果：自 v1.7.0 起，工具触发的"延迟语音"从未真正发出过，且请求被标记为已处理、后续不再重试。测试没抓到是因为 `MockEvent.clear_extra(self, key=None)` 伪造了签名。
+- **修复：`tts_max_chars` 判定用了"清洗前"的文本（线上 P0）**。插件装饰阶段 `priority=999` 先于思考标签清理类插件（如 `astrbot_plugin_thinktags`，默认 `priority=0`）运行，量到的是含泄露思考前缀的文本（实测日志：`819 chars > 98`，随后同一毫秒里 671 字符被剥离）。现在语音文本改为在 `after_message_sent` 里从**真正投递出去的消息链**取（其它插件的改写已生效），既不会因思考前缀误判超限，也不会把思考前缀朗读出来。
+- **行为变更：工具不再承诺送达。** `tvls_send_voice` 运行在回复产生之前，无法预知长度，因此只做两件确定的事：环境不可用时拒绝、**已送达**文本已超限时拒绝；其余返回"语音请求已记录"（不再返回 `Voice message will be sent.`）。工具描述里把上限写成引导，并要求"先写完回复、最后调用一次、返回后不要再输出文字"。
+- **行为变更：工具模式只有一个语音归属点。** 装饰阶段只发文字并一律设 `GENERAL_RESULT`（阻断内置 TTS，同一句话不会被读两遍）；语音在回合最后一条文字真正投递后由 `after_message_sent` 统一生成。移除了旧的 `_tvls_pending_text` / `_maybe_send_deferred_voice` 机制（其触发点在投递之前，会朗读前缀）。
+- **`tts_max_chars` 语义澄清**：按**本回合已送达的可朗读文本**累计计（多步工具回合会累加），超限跳过并在日志记 `WARNING`（不再静默）。`_conf_schema.json` 的 hint 同时列出"已送达"的排除项（`tool_direct_result`、平台丢弃、`forward_threshold` 转发包装、核心直发的工具状态消息），以及内联路径（工具关闭）仍读清洗前文本的已知限制。
+- **新增：一次请求最多一次尝试。** `_tvls_deferred_voice_sent` 在生成前占位；流式 wrapper 在**发送成功之后**才置位，分片失败/取消会告警并保留未服务状态；`on_llm_request` 重置回合状态，若上一回合留有未送达的请求会记 `WARNING`。
+- **新增：`delivered_voice_text()` 单一权威来源**。优先用已投递的装饰文本，仅当该回合没有装饰投递时才回退到 `send_message_to_user` 记录；**不再把两者拼接**（否则会把用户分两条收到的内容当成一条朗读）。
+- **新增：统一语音闸门** `voice_utils.voice_gate_text` / `voice_gate_env`，工具、回合末服务、流式补发、内联路径共用；`tts_max_chars` 解析改为 fail-safe（`"abc"` / 负数 / `None` 一律按"不限制"，不再抛 `TypeError`）。延迟发送路径此前**完全没有**长度检查，现已补齐。
+- **测试底座重写**（`tests/test_voice_tool.py`、`tests/test_smoke.py`）：改为导入生产的 `VoiceTool` / `build_description`（不再手抄副本），mock 事件用 `inspect.signature` 锁真实签名，`get_audio` 改 `AsyncMock` 返回真实临时文件，"发过语音"改用 `context.send_message` 调用次数断言，runner 以非零退出码报告失败。新增用例：工具模式不内联、回合末才服务并朗读整回合、超限跳过有 WARNING、空回合有 WARNING、悬挂请求有 WARNING、跨源不拼接、流式失败不朗读、源码里不得出现带参数的 `clear_extra(`。
+- **文档**：README 新增「语音契约与消息条数」——说明插件不合并/不删除消息，默认配置下工具调用前的回复与工具后的消息是两条，想要"一回合一条"请开启 AstrBot 的 `provider_settings.buffer_intermediate_messages`（仅非流式）；并说明 `GENERAL_RESULT` 对分段回复/splitter 的影响范围。AGENTS.md 按新机制重写工具模式章节与不变量。
+- 已知残余：工具调用前的那条消息仍由核心独立投递，插件无法删除；`tool_direct_result` 直发、平台丢弃、`forward_threshold` 转发包装的文本不在记账范围内；内联路径（工具关闭）仍在装饰阶段取文本。
+
 ## v1.12.0
 
 - **新增翻译参考注入（可选）**：`translate_context_mode` 三档下拉——`off`（默认，行为与 v1.11.0 完全一致）、`persona`（只注入人格）、`persona_context`（人格 + 最近 5 轮对话）。让译文沿用当前人格的称谓、敬语、自称、口癖与情绪强度；默认关闭，保持最快路径

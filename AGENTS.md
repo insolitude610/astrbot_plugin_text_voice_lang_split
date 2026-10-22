@@ -2,98 +2,139 @@
 
 ## Architecture
 
-AstrBot plugin that translates LLM text before TTS, enabling display in one language and speech in another. Three pipeline hooks + deferred voice mechanism handle different output modes:
+AstrBot plugin that translates LLM text before TTS, enabling display in one language and speech in another. Three pipeline hooks + one voice owner per mode:
 
 | Mode | Hook | Mechanism |
 |------|------|-----------|
-| Non-streaming | `@filter.on_decorating_result(priority=999)` | Filter → translate → TTS → append `Record` → set `GENERAL_RESULT` |
-| Streaming | `@filter.on_llm_request` → `@filter.on_llm_response` | `on_llm_request` patches `event.send_streaming` with `finally` voice follow-up; `on_llm_response` stores text |
-| Guard | `@filter.after_message_sent(priority=999)` | Cleans `_streaming_texts` + triggers `_maybe_send_deferred_voice` as last-resort fallback |
-| Deferred voice (v1.7.0) | Subsequent `on_decorating_result` calls + `after_message_sent` | When LLM calls `tvls_send_voice` after text is already sent by first `on_decorating_result`, deferred voice translates+TTS+ sends as independent follow-up message |
+| Non-streaming (tool OFF) | `@filter.on_decorating_result(priority=999)` | Filter → translate → TTS → append `Record` → set `GENERAL_RESULT` |
+| Non-streaming (tool ON) | `on_decorating_result` + `on_llm_response(priority=-1000)` + `after_message_sent(priority=999)` | Decoration delivers **text only** (and always sets `GENERAL_RESULT`, which blocks the built-in TTS). `on_llm_response` marks `_tvls_final_seen`; the `after_message_sent` that follows services the voice from the **delivered** text |
+| Streaming | `@filter.on_llm_request` → `@filter.on_llm_response` | `on_llm_request` patches `event.send_streaming`; the wrapper runs the voice follow-up after the stream (`stream_ok` guards a failed stream) |
 
-Key: `on_decorating_result` does NOT fire for `STREAMING_RESULT`. `after_message_sent` does NOT fire for `STREAMING_RESULT` (RespondStage returns before dispatch). Streaming voice is sent by the patched `send_streaming` wrapper.
+Key: `on_decorating_result` does NOT fire for `STREAMING_RESULT`. `after_message_sent` does NOT fire for `STREAMING_RESULT` either (RespondStage returns before dispatch), so streaming keeps its own owner.
 
 Note: QQ个人号 buffers streaming API text and sends all at once — AstrBot treats this as non-streaming, so `on_decorating_result` fires.
 
 ## Pipeline hook order
 
 ```
-OnLLMRequestEvent → on_llm_request (patches send_streaming here!)
+OnLLMRequestEvent → on_llm_request (reset turn state, patch send_streaming)
     ↓
-ProcessStage { agent runs → on_llm_response fires }
+ProcessStage { agent runs } ── per step: decorate → respond(send) → after_message_sent
+    ↓                         (so a step's text is delivered BEFORE its tool call)
+Tool execution ─ loop continues until the final response
     ↓
-ResultDecorateStage { on_decorating_result fires (non-streaming only) }
+on_agent_done → on_llm_response (fires ONCE: final/abort response, before its delivery)
     ↓
-RespondStage { send_streaming called → patched wrapper sends voice after stream }
-    ↓
-OnAfterMessageSentEvent → after_message_sent (non-streaming only)
+ResultDecorateStage → RespondStage → after_message_sent (the turn's last message)
 ```
 
-## v1.7.0: LLM voice tool + deferred voice
+## Voice tool mode (`enable_llm_voice_tool`) — the current design
 
-### `tvls_send_voice` FunctionTool
+### One voice owner
 
-When `enable_llm_voice_tool` is `true`, `initialize()` registers a `VoiceTool` (`tools/voice_tool.py`) via `self.context.add_llm_tools()`. It extends `FunctionTool[AstrAgentContext]` and sets `event.set_extra("_tvls_voice_requested", True)` when LLM calls it. The `active` field is toggled by config. Off → tool hidden from LLM; plugin always generates voice.
-
-### Tool-loop agent runner quirk — CRITICAL
-
-AstrBot's `tool_loop_agent_runner` fires `on_decorating_result` at **each tool-call iteration**, not just once. Typical flow:
-
-```
-1. LLM generates text "hello world"
-2. on_decorating_result #1 → text sent (no tool marker yet)
-3. LLM calls tvls_send_voice → marker set
-4. on_decorating_result #2 → same text AGAIN (bug: double output)
-```
-
-This caused two bugs fixed in v1.7.0:
-- **Double text**: Same message sent twice (first without voice, second with voice)
-- **Deferred voice lost**: If first iteration has empty chain and second has text, voice was never sent
-
-### `_tvls_decorated` dedup guard — DO NOT MOVE
-
-Lines 243-247: Guard checks `event.get_extra("_tvls_decorated")`. If set, blocks duplicate output and calls `_maybe_send_deferred_voice(event)`.
+`on_decorating_result` never voices in tool mode and always sets
+`result.result_content_type = GENERAL_RESULT` + `use_t2i_ = False`. That single
+flag does two jobs: it stops AstrBot's built-in TTS from reading the same reply
+(`is_llm_result()` becomes False), and it marks the message as already
+decided. The plugin's own voice is produced **later**, once:
 
 ```
-# At top after is_llm_result() check:
-if event.get_extra("_tvls_decorated", False):
-    self._maybe_send_deferred_voice(event)
-    result.result_content_type = ResultContentType.GENERAL_RESULT
-    result.use_t2i_ = False
-    return
+on_llm_response (priority=-1000)  → _tvls_final_seen = True
+                                 → if the final text is empty: service now
+after_message_sent (final msg)   → record shipped text, then service
 ```
 
-**CRITICAL: `event.set_extra("_tvls_decorated", True)` must be placed AFTER `if not plain_texts: return` (line 273), not before.** If placed before text extraction, empty-chain calls (tool loop iteration with no text) falsely mark the event as processed, permanently blocking subsequent calls with actual text from generating voice.
+### Why the tool cannot promise
 
-### Deferred voice event extras
+`VoiceTool.call()` runs *before* the reply exists (AstrBot yields the assistant
+text of a step before executing its tool calls), so it cannot know the final
+length. It therefore:
 
-Four extras on `event` control the deferred voice flow:
+- refuses only what is already certain: unavailable environment
+  (`voice_gate_env`), or already-delivered text already over `tts_max_chars`
+  (monotonic);
+- otherwise records `_tvls_voice_requested` and answers "Voice request
+  recorded." — never "will be sent";
+- is idempotent: a second call is refused without changing state.
 
-| Extra key | Set by | Cleared by | Purpose |
-|-----------|--------|------------|---------|
-| `_tvls_decorated` | First `on_decorating_result` with text | Not cleared | Blocks duplicate calls |
-| `_tvls_voice_requested` | `VoiceTool.call()` | Not cleared | LLM called the tool |
-| `_tvls_pending_text` | First `on_decorating_result` when gate fires (tool ON, no marker) | `_maybe_send_deferred_voice` on trigger | Text to speak if voice deferred |
-| `_tvls_deferred_voice_sent` | `_maybe_send_deferred_voice` on trigger | Not cleared | Prevents double voice send |
+The description (`build_description(max_chars)` in `tools/voice_tool.py`) states
+the length as **guidance**, tells the model to write the whole reply first and
+call once, and to write nothing afterwards. `main.initialize()` rebuilds it from
+the live config, so the model sees the current cap.
 
-`_maybe_send_deferred_voice` is called from 3 sites (subsequent `on_decorating_result`, `after_message_sent`). The `_tvls_deferred_voice_sent` guard prevents double-triggering across all three.
+### Delivered-text accounting
 
-### Deferred voice send
+`after_message_sent` reads `event.get_result()` — still the chain RespondStage
+shipped (`clear_result()` runs right after the hook), so sibling handlers'
+rewrites are already applied. It appends the filtered `Plain` text to
+`_tvls_pipeline_delivered` and marks the result object with
+`_tvls_confirmed` (dataclass, no slots — **do not use `id()` as a token**).
 
-`_send_deferred_voice` is spawned via `asyncio.create_task()`. It independently: gets TTS provider → translates → generates audio → sends as follow-up `MessageChain` with `Record`. Error handling wraps each async step.
+`TextVoiceLangSplit.delivered_voice_text(event)` is the single authority for
+"what would a voice say": the accumulated shipped text, and only when that is
+empty, `_send_message_to_user_current_session_plain_texts`. **Never concatenate
+the two** — the user received them as separate messages.
+
+### Turn state (event extras, reset in `on_llm_request`)
+
+| Extra | Set by | Purpose |
+|-------|--------|---------|
+| `_tvls_decorated` | first text-bearing decoration | later steps must not re-voice or re-translate |
+| `_tvls_pipeline_delivered` | `after_message_sent` | the text the user actually received |
+| `_tvls_final_seen` | `on_llm_response` | the next delivered message is the turn's last |
+| `_tvls_voice_requested` | `VoiceTool.call()` (accepted) | LLM asked for a voice |
+| `_tvls_deferred_voice_sent` | the service / streaming wrapper | request consumed exactly once |
+
+`on_llm_request` **resets** all five (a follow-up turn can reuse the event) and
+logs a `WARNING` if the previous turn left a request unserved.
+
+### Every refusal is logged
+
+The service never ends silently: missing delivered text, `voice_gate_env`
+failure, `voice_gate_text` failure (`empty` / `too_long` with both numbers),
+translation/TTS failure and a partially-sent voice all log at `WARNING`.
+A dropped voice is therefore always visible in the log.
+
+### Invariants — do not break these
+
+1. **One verdict function.** All consumers (tool, service, streaming follow-up,
+   inline path) go through `voice_utils.voice_gate_text` /
+   `voice_gate_env`. Never re-implement the emptiness/cap comparison.
+2. **Tool mode never voices inline**, and every early return in tool mode sets
+   `GENERAL_RESULT` + `use_t2i_ = False`. Otherwise the built-in TTS reads the
+   reply a second time.
+3. **Never call `event.clear_extra(<key>)`.** `AstrMessageEvent.clear_extra(self)`
+   takes no argument (it wipes every extra); use `set_extra(key, None)`.
+   v1.7.0–v1.12.0 got this wrong and the `TypeError` silently disabled the
+   whole deferred-voice path.
+4. **The voiced text is the delivered text, from one source.** Do not snapshot
+   text at decoration time (it may be a prefix, or pre-sibling-cleanup) and do
+   not merge `send_message_to_user` text into the shipped text.
+5. **One request, at most one attempt.** Set `_tvls_deferred_voice_sent`
+   before spawning, and only in the single owner of the mode.
+6. **The plugin never merges or deletes messages.** Message count belongs to
+   AstrBot (`buffer_intermediate_messages`); a plugin cannot remove the
+   pre-tool message.
+
 
 ## Streaming voice mechanism (v1.5.0+)
 
 `on_llm_request` runs BEFORE agent. It monkey-patches `event.send_streaming`:
 
 ```python
-event.send_streaming = lambda stream, *a, **kw: (
-    await original(stream, *a, **kw);  # finish
-    await self._send_streaming_follow_up(event, session_key)  # voice
-)
+async def _patched(stream, *args, **kwargs):
+    stream_ok = False
+    try:
+        await original(stream, *args, **kwargs)
+        stream_ok = True
+    finally:
+        await voice_utils.send_streaming_follow_up(..., stream_ok=stream_ok)
 ```
 
-Guarded by `_tvls_stream_patched` flag to prevent double-patching. Streaming `_send_streaming_follow_up` also checks `_tvls_voice_requested` when `enable_llm_voice_tool` is ON.
+Guarded by `_tvls_stream_patched` to prevent double-patching. The wrapper is the
+single streaming voice owner: it consumes `_tvls_deferred_voice_sent` **only
+after a successful send**, warns on a partial send, and skips the voice entirely
+when `stream_ok` is False (the user never received the text).
 
 ## `_strip_thinking` regex — CRITICAL
 
@@ -198,7 +239,23 @@ Setting `result.result_content_type = ResultContentType.GENERAL_RESULT`:
 - ❌ Breaks segmented replies (`is_model_result()` returns False)
 - ❌ RespondStage extracts and sends `Record` components first → voice arrives before text
 
+In tool mode this flag is set on **every** message the plugin decorates (not
+only the over-cap ones), because the plugin's voice is delivered later as its
+own message. So segmented replies / splitter processing / plugins that read
+`is_model_result()` are affected for every tool-mode reply — see the README
+caveat.
+
 **Decision:** Segmented replies are documented as mutually exclusive with this plugin. Users choose one or the other.
+
+## Cap semantics
+
+`tts_max_chars` is measured on the **turn's accumulated delivered speakable
+text** (`voice_gate_text`), not per message: the voice speaks what the user
+received in this turn, and a multi-step tool turn adds up. This is a deliberate
+change from the pre-v1.13 per-message check; the schema hint, README and
+CHANGELOG all say so. "Delivered" excludes text the plugin cannot see
+(`tool_direct_result`, platform drops, `forward_threshold` merged forwards) and
+tool-status messages sent by core inside the agent loop.
 
 ## `on_llm_response` — result_chain fallback
 
@@ -220,27 +277,27 @@ from astrbot.core.astr_agent_context import AstrAgentContext  # generic param fo
 from astrbot.api import FunctionTool
 ```
 
-## Tool registration pattern (v1.7.0)
+## Tool registration pattern
 
 ```python
-from dataclasses import dataclass, field
-
 @dataclass
 class VoiceTool(FunctionTool[AstrAgentContext]):
     plugin: Any | None = None
     name: str = "tvls_send_voice"
-    description: str = "..."
+    description: str = ""          # filled by build_description(max_chars)
     parameters: dict = field(default_factory=lambda: {
         "type": "object", "properties": {}, "required": [],
     })
 
     async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> str:
-        event = context.context.event  # AstrMessageEvent via agent context
-        event.set_extra("_tvls_voice_requested", True)
-        return "Voice message will be sent."
+        event = context.context.event   # AstrMessageEvent via agent context
+        # gate → record the request (never promise delivery)
 ```
 
-Register in `initialize()` via `self.context.add_llm_tools(tool_instance)`. Registration replaces existing tool with same name. Toggle `tool.active` to show/hide from LLM.
+Register in `initialize()` via `self.context.add_llm_tools(tool_instance)`;
+`initialize()` also assigns `tool.description = build_description(cap)` because
+AstrBot reads `description`/`active` when it builds the request, so mutating
+after registration is effective. Toggle `tool.active` to show/hide from the LLM.
 
 ## Config schema gotcha
 
@@ -252,7 +309,22 @@ Register in `initialize()` via `self.context.add_llm_tools(tool_instance)`. Regi
 
 ## Tests
 
-Nine test suites, all in `tests/` (gitignored):
+Nine test suites, all in `tests/` (gitignored). They must run against the
+**production** modules — v1.13.0 rewrote `tests/test_voice_tool.py` and
+`tests/test_smoke.py` because the old harness copied the tool implementation and
+used a synchronous `MagicMock` for `get_audio`, so a swallowed `TypeError` (and
+the live `clear_extra(key)` bug) showed up as `PASS`.
+
+Rules for this suite:
+- never re-implement `VoiceTool`/`build_description` in a test; import them;
+- mock events must mirror the real signatures (`clear_extra(self)` takes no key,
+  `set_extra(key, value)`, `get_extra(key=None, default=None)`) — asserted with
+  `inspect.signature`;
+- `get_audio` is an `AsyncMock` returning a real temp path;
+- "a voice was sent" is asserted by counting `context.send_message` awaits, not
+  by checking a flag;
+- runners end with `raise SystemExit(1 if failed else 0)`, so a failure is never
+  silent.
 
 ```bash
 # Run with AstrBot venv (REAL import layer, full integration):
@@ -268,10 +340,12 @@ foreach ($t in @("test_translation_context.py", "test_split_parity.py",
 python tests/test_translation_context.py
 python tests/test_strip_thinking.py
 python tests/test_filter_text_for_tts.py
-python tests/test_voice_tool.py
 ```
 
-`test_voice_tool.py`, `test_translation_prompt.py`, `test_translation_context.py` and `test_strip_thinking.py` have dual layers: reference layer (standalone) + integration layer (requires AstrBot venv, uses real imports). `test_split_parity.py` needs the plugin's `v1.8.0` git tag and rewrites `tests/_ref_main_v180.py`.
+`test_translation_prompt.py`, `test_translation_context.py` and
+`test_strip_thinking.py` have dual layers: reference layer (standalone) +
+integration layer (requires the AstrBot venv). `test_split_parity.py` needs the
+plugin's `v1.8.0` git tag and rewrites `tests/_ref_main_v180.py`.
 
 ## Commands
 
