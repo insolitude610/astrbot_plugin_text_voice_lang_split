@@ -7,7 +7,7 @@ AstrBot plugin that translates LLM text before TTS, enabling display in one lang
 | Mode | Hook | Mechanism |
 |------|------|-----------|
 | Non-streaming (tool OFF) | `@filter.on_decorating_result(priority=999)` | Filter → translate → TTS → append `Record` → set `GENERAL_RESULT` |
-| Non-streaming (tool ON) | `on_decorating_result` + `on_llm_response(priority=-1000)` + `after_message_sent(priority=999)` | Decoration delivers **text only** (and always sets `GENERAL_RESULT`, which blocks the built-in TTS). `on_llm_response` marks `_tvls_final_seen`; the `after_message_sent` that follows services the voice from the **delivered** text |
+| Non-streaming (tool ON) | `on_decorating_result` + `on_llm_response(priority=-1000)` + `after_message_sent(priority=999)` | Decoration delivers **text only** (and always sets `GENERAL_RESULT`, which blocks the built-in TTS). `on_llm_response` marks `_tvls_final_seen`; the `after_message_sent` that follows services the voice from the **delivered** text. An exact all-plain repeat of the delivered text after a tool call is suppressed and the voice is serviced immediately |
 | Streaming | `@filter.on_llm_request` → `@filter.on_llm_response` | `on_llm_request` patches `event.send_streaming`; the wrapper runs the voice follow-up after the stream (`stream_ok` guards a failed stream) |
 
 Key: `on_decorating_result` does NOT fire for `STREAMING_RESULT`. `after_message_sent` does NOT fire for `STREAMING_RESULT` either (RespondStage returns before dispatch), so streaming keeps its own owner.
@@ -112,9 +112,14 @@ A dropped voice is therefore always visible in the log.
    not merge `send_message_to_user` text into the shipped text.
 5. **One request, at most one attempt.** Set `_tvls_deferred_voice_sent`
    before spawning, and only in the single owner of the mode.
-6. **The plugin never merges or deletes messages.** Message count belongs to
-   AstrBot (`buffer_intermediate_messages`); a plugin cannot remove the
-   pre-tool message.
+6. **The plugin never rewrites user-visible content, with one narrow exception.**
+   Message count belongs to AstrBot (`buffer_intermediate_messages`); a plugin
+   cannot remove the pre-tool message. In tool mode with a requested voice, an
+   all-plain second message that exactly repeats the last delivered text is
+   suppressed (and the voice is serviced from the delivered text) — only when
+   the voice environment and the turn-level gate both allow a voice. Media,
+   different text and non-final messages are never touched. The duplicate
+   assistant entry stays in conversation history; the plugin does not edit it.
 
 
 ## Streaming voice mechanism (v1.5.0+)

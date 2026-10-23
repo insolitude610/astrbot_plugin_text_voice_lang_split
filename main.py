@@ -150,6 +150,49 @@ class TextVoiceLangSplit(Star):
         """Gate helper shared by the tool and the turn-end service."""
         return voice_utils.voice_gate_text(text, self.config, self._filter_patterns)
 
+    async def _suppress_duplicate_tool_text(
+        self, event: AstrMessageEvent, result
+    ) -> bool:
+        """Drop an exact repeat of the delivered reply after the tool call.
+
+        AstrBot delivers every tool-loop step separately, so a model that
+        repeats its reply after the tool result posts the same text twice and
+        the turn-end voice reads it twice. Only a plain-text chain identical to
+        the last delivered text is removed, and only when the voice can
+        actually be produced from the already delivered text; media, different
+        text and turns without a voice request keep their current behavior.
+        """
+        chain = result.chain
+        if not chain or not all(isinstance(comp, Plain) for comp in chain):
+            return False
+        current = " ".join(
+            comp.text.strip() for comp in chain if comp.text and comp.text.strip()
+        )
+        delivered = event.get_extra("_tvls_pipeline_delivered", None) or []
+        if not current or not isinstance(delivered, list) or not delivered:
+            return False
+        last = str(delivered[-1]).strip()
+        if not last or current != last:
+            return False
+        env = await voice_utils.voice_gate_env(self.context, self.config, event)
+        gate = self.voice_gate_for_text(self.delivered_voice_text(event))
+        if not (env.ok and gate.ok):
+            logger.info(
+                "[text_voice_lang_split] Duplicate post-tool text left in place: "
+                f"voice unavailable ({env.reason or gate.reason})"
+            )
+            return False
+        chain.clear()
+        result.result_content_type = ResultContentType.GENERAL_RESULT
+        result.use_t2i_ = False
+        self._streaming_texts.pop(self._get_session_key(event), None)
+        await self._maybe_send_turn_voice(event)
+        logger.info(
+            "[text_voice_lang_split] Suppressed the identical post-tool text "
+            "message; the voice is serviced from the delivered text"
+        )
+        return True
+
     # ── pipeline hooks ────────────────────────────────────────────────
 
     @filter.on_decorating_result(priority=999)
@@ -169,6 +212,21 @@ class TextVoiceLangSplit(Star):
             return
 
         tool_mode = bool(self.config.get("enable_llm_voice_tool", False))
+
+        # AstrBot ships every tool-loop step as its own message. A model that
+        # repeats the reply after the tool result would post the same text
+        # twice (and the turn-end voice would read it twice). Suppress exactly
+        # that duplicate: only an all-plain chain identical to the already
+        # delivered text, only in tool mode with a voice request, and only when
+        # the voice can actually be produced. Media and different text stay.
+        if (
+            tool_mode
+            and event.get_extra("_tvls_decorated", False)
+            and event.get_extra("_tvls_final_seen", False)
+            and event.get_extra("_tvls_voice_requested", False)
+            and await self._suppress_duplicate_tool_text(event, result)
+        ):
+            return
 
         # The tool-loop delivers the assistant text of every step separately.
         # Only the first one carries the reply; later ones are handled by the

@@ -78,8 +78,8 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 工具模式（`enable_llm_voice_tool=true`）下的行为，请按这份契约理解：
 
 1. **工具不承诺送达。** `tvls_send_voice` 只记录"本轮想要语音"；它运行在回复产生**之前**，无法预知最终长度。工具只在两种确定的情况下拒绝：语音环境不可用（会话开关关闭 / 无 TTS Provider / 全局 TTS 关闭 / 会话 TTS 被关），或**已经送达**的文本已超上限。其余情况返回"请求已记录"。
-2. **只有一个语音来源。** 装饰阶段只发文字，并设 `GENERAL_RESULT` 阻断内置 TTS，所以同一句话不会被读两遍。语音在回合最后一条文字真正投递后（`after_message_sent`）才生成，朗读的是**本回合累计投递的文本**（多步工具回合会把前后几条文字合成一次朗读，cap 也按累计计），超限则跳过并记 `WARNING`。
-3. **插件不合并、不删除消息。** 默认配置（`buffer_intermediate_messages=false`）下，AstrBot 会把工具调用前的回复和工具后的消息投递成**两条**独立消息，插件无法合并。想要"一回合一条文字 + 至多一条语音"，请开启 AstrBot → Provider 设置 → **合并 Agent 中间消息**（`buffer_intermediate_messages`，仅非流式）。
+2. **只有一个语音来源。** 装饰阶段只发文字，并设 `GENERAL_RESULT` 阻断内置 TTS，所以同一句话不会被读两遍。语音在回合最后一条文字真正投递后（`after_message_sent`）才生成，朗读的是**本回合累计投递的文本**（多步工具回合会把前后几条文字合成一次朗读，cap 也按累计计），超限则跳过并记 `WARNING`。若工具返回后模型重复了同一句，且语音可以正常生成，重复的那条会被抑制，语音改从已投递的那条立即服务（仍然只读一遍）。
+3. **只有完全重复的 post-tool 文本会被抑制。** 默认配置（`buffer_intermediate_messages=false`）下，AstrBot 会把工具调用前的回复和工具后的消息投递成两条独立消息。工具模式 + 已请求语音时，若第二条是**纯文本**、且与最后一条已投递文本**完全相同**、并且语音环境与长度 gate 都允许，插件会清空第二条（不发），由已投递文本服务语音；其它情况（不同文本、带图片/媒体、语音不可用、不是最终步骤的重复、`reply_prefix` 非空、转发/分段、`send_message_to_user` 代发导致首条被跳过等）保持原有行为。历史里仍会保存模型重复的 assistant 记录，插件不改历史。被抑制的消息不会再触发 `after_message_sent`，因此其它插件在该钩子里为这条重复消息排队的内容（以及它们的临时文件清理）也不会执行。已知边界：AstrBot 的首条发送异常仍会触发 `after_message_sent`，此时记录里算已投递，抑制可能生效（插件拿不到真实的送达信号）。工具未开启或未请求语音时完全不介入。想要“一回合一条文字 + 至多一条语音”，可同时开启 AstrBot → Provider 设置 → **合并 Agent 中间消息**（`buffer_intermediate_messages`，仅非流式）；注意在当前 `turn_off` 策略 + 不支持流式的平台上该合并本身不会生效，需把 `unsupported_streaming_strategy` 改为非 `turn_off`，且合并后的重复文本不在本抑制范围内。
 4. **已知排除项**（插件看不到或不会朗读的文本）：`tool_direct_result` 直发的消息、平台侧丢弃的消息、`platform_settings.forward_threshold` 过长触发的**合并转发**（链里没有纯文本）、以及开启「输出工具调用信息」时核心直发的工具状态消息。
 5. **内联路径（工具关闭）** 仍在装饰阶段取文本，读到的是其它插件清洗**之前**的内容。若你同时使用思考标签清理类插件，建议改用工具模式，或把对应正则补进 `remove_patterns`。
 

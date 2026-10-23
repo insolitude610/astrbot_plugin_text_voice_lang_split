@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.13.1
+
+- **修复：工具模式同一句回复在工具返回后被模型重复输出时，会连续发两条相同文本。** AstrBot 会把工具循环每一步的文本分别投递；模型在 `tvls_send_voice` 返回后没有按工具约定停止输出，而是又写了一遍同样的回复，于是两条文本先后发出，回合末语音还会把同一句读两遍。
+- **只在可确认的重复上抑制**：工具模式 + 已请求语音 + 当前消息只含纯文本 + 与最后一条已投递文本完全相同 + `voice_gate_env` 与回合级 `voice_gate_text` 都允许。命中时清空第二条 `result.chain`（不发送），并从已投递文本立即服务语音；用户看到一条文字 + 一条语音，语音只读一遍。
+- **不介入的情况**：不同文本、带图片/媒体、语音不可用或超限、不是最终步骤的重复、`reply_prefix` 非空、转发/分段、`send_message_to_user` 代发导致首条被跳过、工具关闭或未请求语音——保持原有行为。历史中仍会保存模型重复的 assistant 记录（插件不改历史）。已知边界：首条发送异常仍会触发 `after_message_sent`（记录算已投递，抑制可能生效）；被抑制的消息不再触发 `after_message_sent`，所以其它插件在该钩子里为这条重复消息排队的内容（以及它们的临时文件清理）也不会执行。
+- **不覆盖合并模式**：`buffer_intermediate_messages=true` 需要 `unsupported_streaming_strategy != "turn_off"`（当前 `turn_off` + aiocqhttp 不会合并）；即使合并，重复文本也留在同一条消息内，本抑制不处理。
+- **测试**：`tests/test_smoke.py` 新增 11 项（生产顺序、实际 `Record.text`、媒体/不同文本/未请求/无投递/工具关闭/首条/环境不可用/累计 cap/空白归一）。全部 tvls standalone 测试通过（`tests/` 按仓库惯例不纳入版本控制）。
+
 ## v1.13.0
 
 - **修复：工具请求语音后永远收不到（线上 P0）**。`main.py` 里 `event.clear_extra("_tvls_pending_text")` 与实际签名不符——`AstrMessageEvent.clear_extra(self)` **不接受参数**（它清空全部 extras），该调用必然抛 `TypeError`，而它位于 `_tvls_deferred_voice_sent = True` **之后**、任务创建之前，异常又被事件钩子封装吞掉。结果：自 v1.7.0 起，工具触发的"延迟语音"从未真正发出过，且请求被标记为已处理、后续不再重试。测试没抓到是因为 `MockEvent.clear_extra(self, key=None)` 伪造了签名。
