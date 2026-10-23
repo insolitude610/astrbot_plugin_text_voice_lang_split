@@ -111,6 +111,11 @@
 - **安全口语措辞规则泛化**：哭声、喘息、嘶吼、拟声词等禁用规则不再引用日语特例（如 うぅ、にゃん），改为跨语言通用描述
 - 移除 `prompt_full` 中间变量，翻译源文本直接嵌入 `prompt` 末尾
 
+## v1.5.2（已回退）
+
+- 曾修复「主动消息（proactive chat）不触发 TTS」：主动消息插件用 `context.llm_generate()` 直接取 LLM 回复，构造的 `MessageEventResult` 默认 `content_type` 为 `GENERAL_RESULT`，旧守卫 `is_llm_result()` 只接受 `LLM_RESULT` 导致被跳过；当时改为检查 chain 中是否有文本且无已有 Record，不再依赖 `content_type` 判断。
+- **该修复已回退**（`10e7859`）：主动消息由插件自身处理 TTS，恢复 `is_llm_result()` 守卫。v1.5.2 不再作为发布版本，行为等同 v1.5.1。
+
 ## v1.5.1
 
 - 修复 `_strip_thinking` 中 ` response` 正则的严重 bug：旧版 `\s*\presponse` 含非法转义 `\p`（Python 3.12 直接抛出 `re.error`），修正为 `\s*response`。此前 `_strip_thinking` 每次调用都崩溃，被 `_translate_text` 的 `except Exception` 静默吞掉，导致翻译一直"失败"返回 None，插件从未真正执行过思考剥离
