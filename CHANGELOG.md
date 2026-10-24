@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.13.2
+
+- **修复：开启 `buffer_intermediate_messages` 后，某个守规矩的回合可能一句语音都收不到。** 合并模式下整回合文字在 `agent_runner.done()` 之后才作为**一条**消息投递；若模型遵守工具协议（工具返回后不再输出文字），最终响应文本为空，`on_llm_response` 会立刻服务语音——此刻 `_tvls_pipeline_delivered` 还是空的。旧实现在这条分支里**已经**置了 `_tvls_deferred_voice_sent`，随后那条合并消息的 `after_message_sent` 因标记被跳过，请求被"消费成成功"却从未发出。
+- **服务前提收紧为"必须有装饰投递"**：`_maybe_send_turn_voice` 先要求 `_tvls_pipeline_delivered` 非空，才占用唯一一次尝试（`_tvls_deferred_voice_sent`）。没有投递时改为 `logger.warning` 并**保持待发**，由真正携带回复的那次投递补发；占位之后的拒绝（环境不可用 / 超限）仍然保持"消费一次不重试"。`on_llm_request` 的 dangling `WARNING` 仍是跨回合兜底。
+- **行为变更：`send_message_to_user` 的文本不再可能被朗读。** `delivered_voice_text()` 的该回退只用于"本回合没有任何装饰投递"的场景，而服务现在要求装饰投递，因此它不再是服务来源（用户没当作回复看到的内容不会被念出来）。取舍：一个"只用 `send_message_to_user` 回答、从无装饰投递"的回合不再产生语音，只留一条 `WARNING`。
+- **修复：合并模式下模型"同一句写两遍"会被原样发出。** 模型在 `tvls_send_voice` 返回后又写了一遍同一句（v1.13.1 记录过的老毛病），开启 `buffer_intermediate_messages` 后两份文本被并进同一条消息，跨消息抑制看不到它。更麻烦的是 `meme_manager`（priority 99999，比本插件更早跑）会把相邻 Plain 段规范化成一段，因此只能按文本处理：新增 `_collapse_verbatim_repeat`，只折叠"完整一句话原样重复一遍"（两个半段逐字符相同、半段长度 ≥8、接缝前一个字符是句末/停顿标记 `。？！?!~…`），因此「哈哈哈…」「好的好的」不会被误伤；折叠仍受工具模式 + 已请求语音 + 语音可生成三重门控，不满足就原样保留并记一条 `INFO`。
+- **新增：`hold_text_for_voice_timeout`（默认 20 秒）——用等待换连贯。** 语音必须先「翻译 + TTS」才能发出，本机实测**音频就绪 4.97–6.12 秒**（translate 2.27–3.41s + TTS 2.12–2.89s；平台上传另计 1.5–3.3s），所以「文字立刻发、语音十秒后才到」在观感上是断开的。开启后，工具模式的**最后一条**文字会被压住：先把音频生成好，再按「先文字、后语音」连着发——总时长不变，间隔从 8.6–12.2s 降到 **1.5–3.3s**（只剩 QQ 上传）。仅在「本回合只有这一条消息」时生效（`_tvls_pipeline_delivered` 为空 + `_tvls_final_seen` + 已请求语音）。
+  - **默认值按实测留余量**：默认 20s ≈ 实测上限的 3 倍——命中超时的后果比不压住**更差**（文字被压到超时才发，且会放弃已完成的翻译、在回合末再生成一遍），还会多一次 LLM + TTS 调用。超时分支的 WARNING 明确写出这一点，`_conf_schema.json` 的 hint 也建议先看 `Voice ready in X.XXs (translate=…, tts=…)` 再按实测上限的 2–3 倍定值。
+  - **已知代价（如实记录）**：超时会双份生成（见上）；被压住的消息不经过排在其后的装饰插件（思考标签清理、分段回复）以及装饰阶段末尾的文本转图片/`use_markdown_` 等元数据，但它们的 `after_message_sent` 钩子会被补发；设为 0 可完全关闭。
+- **先发文字、成功了才接管**：文字链是**发送成功之后**才从 `result.chain` 里清掉的，并且检查 `context.send_message` 的布尔返回；发送抛异常或返回 `False` 时立刻把链交回管线（退回「管线发文字 + 回合末补语音」），语音临时文件同时释放。因此**任何情况下都不会吞掉回复**——这是终审发现的 P1，已在实现里修掉并有 3 条回归测试（`send_message` 返回 False、抛异常、语音发送失败）。
+- **补发 `after_message_sent`**：被压住的那条由插件亲自发送，管线不会为它触发 `OnAfterMessageSentEvent`；不发的话，兄弟插件挂在该钩子上的待办会被静默丢弃（`meme_manager` 的排队表情图与临时文件清理就在那里）。现在由插件在发完这一对之后补发该钩子（`_notify_after_message_sent`，核心 API 不可用时降级为一条 debug 日志）。
+- **新增可观测（四行）**：服务前的 `Voicing the turn's delivered text (N chars): '...'`（语音读的是哪条文本、多长）、`Voice ready in X.XXs (translate=…, tts=…, chunks=…)`（延迟花在哪）、`Reply chain at priority 999: Plain:36`（本插件收到的链形状）、`Shipped the held reply text` / `Shipped the turn's text and voice back-to-back`（压住路径的两个发送时刻），以及启动时的 `Message count: buffer=…, streaming=…, strategy=…`（合并有没有生效）。此前这些都不可见——本次定位"同一句两遍"与"12 秒间隔"全靠它们。
+- **文档**：README「语音契约与消息条数」重写第 2 条，并新增第 4 条，给出「一回合一条文字 + 一条语音」的完整配方（三个键缺一无效、必须重启、面板点不出来的原因、`webchat` 不受影响、以及"所有回合文字改为回合末一次性发出"的副作用）；`AGENTS.md` 不变量 4/5/6 与「Every refusal is logged」同步改写。
+- **测试**：`tests/test_smoke.py` 新增 17 项——合并投递只发一次语音、最终响应为空时保持 pending 并由后续投递补发、拒绝后不重试、`send_message_to_user` 不作为来源、投递链无纯文本时保持 pending、文本内完整句重复折叠、非句子重复不误伤、压住的六种分支（成功/超时/失败/hold=0/非最后消息/已有投递）、**文字发送失败与返回 False 两条"回复不得丢"回归**、语音发送失败 WARNING、补发 `after_message_sent`、超时后的二次生成；`test_turn_voice_empty_turn_logs_warning` 补上"不得消耗请求"的断言。全部 9 个套件通过（**smoke 50/50**、voice_tool 18/18），`ruff format --check` / `ruff check` 干净。
+
 ## v1.13.1
 
 - **修复：工具模式同一句回复在工具返回后被模型重复输出时，会连续发两条相同文本。** AstrBot 会把工具循环每一步的文本分别投递；模型在 `tvls_send_voice` 返回后没有按工具约定停止输出，而是又写了一遍同样的回复，于是两条文本先后发出，回合末语音还会把同一句读两遍。

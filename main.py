@@ -1,7 +1,7 @@
 import asyncio
 
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import filter
+from astrbot.api.event import MessageChain, filter
 from astrbot.api.provider import LLMResponse
 from astrbot.api.star import Context, Star
 from astrbot.core.message.components import Plain, Record
@@ -20,9 +20,45 @@ except Exception:  # pragma: no cover - older AstrBot
         "the WebChat special default persona will not be injected"
     )
 
+try:  # Needed to release sibling plugins' post-send work for held messages.
+    from astrbot.core.pipeline.context import call_event_hook
+    from astrbot.core.star.star_handler import EventType
+except Exception:  # pragma: no cover - layout moved between versions
+    call_event_hook = None
+    EventType = None
+    logger.debug(
+        "[text_voice_lang_split] call_event_hook unavailable; the post-send hook "
+        "will not run for messages the plugin ships itself"
+    )
+
 from . import context_utils, text_utils, voice_utils
 from .tools import VoiceTool
 from .tools.voice_tool import build_description
+
+# Only a whole sentence repeated verbatim is collapsed: the boundary must be a
+# sentence terminator, so laughter / stutters ("哈哈哈…", "好的好的") are never
+# touched.
+_SENTENCE_ENDINGS = "。？！?!~…"
+_MIN_REPEAT_HALF = 8
+
+
+def _collapse_verbatim_repeat(text: str) -> str:
+    """Turn `X + X` into `X` when X is one sentence repeated verbatim.
+
+    Defensive on every axis: exact halves only, at least
+    `_MIN_REPEAT_HALF` characters each, and the last character before the seam
+    must end a sentence. Anything else is returned unchanged.
+    """
+    for _ in range(3):
+        size = len(text)
+        if size < _MIN_REPEAT_HALF * 2 or size % 2:
+            break
+        half = size // 2
+        head, tail = text[:half], text[half:]
+        if head != tail or head[-1] not in _SENTENCE_ENDINGS:
+            break
+        text = head
+    return text
 
 
 class TextVoiceLangSplit(Star):
@@ -69,6 +105,32 @@ class TextVoiceLangSplit(Star):
                 "[text_voice_lang_split] Voice tool enabled; voice follows the "
                 f"turn's delivered text (max_chars={max_chars or 'unlimited'})"
             )
+            self._log_message_count_settings()
+
+    def _log_message_count_settings(self) -> None:
+        """Log the core knobs that decide how many messages a turn ships.
+
+        One line per boot: whether the whole turn is merged into one message
+        depends on these three values together, and the combination is not
+        visible anywhere else in the log (this is also the fastest way to tell
+        "the merge silently did not happen" from "the merge happened").
+        """
+        try:
+            settings = self.context.get_config().get("provider_settings", {})
+        except Exception:
+            logger.debug(
+                "[text_voice_lang_split] Could not read provider_settings for the "
+                "message-count log line",
+                exc_info=True,
+            )
+            return
+        logger.info(
+            "[text_voice_lang_split] Message count: "
+            f"buffer_intermediate_messages={settings.get('buffer_intermediate_messages')}, "
+            f"streaming_response={settings.get('streaming_response')}, "
+            f"unsupported_streaming_strategy={settings.get('unsupported_streaming_strategy')!r} "
+            "(merge needs buffer=true + streaming=false + strategy!='turn_off')"
+        )
 
     # ── turn state ────────────────────────────────────────────────────
 
@@ -193,6 +255,73 @@ class TextVoiceLangSplit(Star):
         )
         return True
 
+    async def _collapse_duplicate_reply_text(
+        self, event: AstrMessageEvent, result
+    ) -> bool:
+        """Collapse a reply the model emitted twice inside one merged turn.
+
+        The model re-emits its sentence after `tvls_send_voice` returns (this is
+        the same behaviour v1.13.1 suppressed across two messages). With
+        `buffer_intermediate_messages` both copies ship in ONE message, and a
+        sibling decorating plugin that runs before this one
+        (`meme_manager`, priority 99999) normalizes adjacent plain segments into
+        a single one — so both shapes must be handled:
+        adjacent identical segments, and one segment whose text is exactly the
+        same sentence twice.
+
+        Same policy as the message-level suppression: tool mode + a live voice
+        request, exact text only, and only when the voice can actually be
+        produced from what is left — otherwise the duplicate is left alone.
+        Never touches media, never reorders, never rewrites remaining text.
+        """
+        chain = result.chain
+        kept: list = []
+        planned: list[tuple[object, str]] = []
+        dropped = 0
+        previous = None
+        for comp in chain:
+            if isinstance(comp, Plain):
+                text = (comp.text or "").strip()
+                if text and text == previous:
+                    dropped += 1
+                    continue
+                collapsed = _collapse_verbatim_repeat(text)
+                if collapsed != text:
+                    planned.append((comp, collapsed))
+                previous = collapsed
+            else:
+                # Strictly adjacent only: any other segment breaks the run.
+                previous = None
+            kept.append(comp)
+        if not dropped and not planned:
+            return False
+
+        replaced = {id(comp): collapsed for comp, collapsed in planned}
+        candidate = " ".join(
+            replaced.get(id(comp), (comp.text or "").strip())
+            for comp in kept
+            if isinstance(comp, Plain)
+            and replaced.get(id(comp), (comp.text or "").strip())
+        )
+        env = await voice_utils.voice_gate_env(self.context, self.config, event)
+        gate = self.voice_gate_for_text(candidate)
+        if not (env.ok and gate.ok):
+            logger.info(
+                "[text_voice_lang_split] Duplicate reply text left in place: "
+                f"voice unavailable ({env.reason or gate.reason})"
+            )
+            return False
+
+        for comp, collapsed in planned:
+            comp.text = collapsed
+        chain[:] = kept
+        logger.info(
+            "[text_voice_lang_split] Collapsed duplicate reply text inside the "
+            f"merged turn ({dropped} repeated segment(s), "
+            f"{len(planned)} verbatim repeat(s))"
+        )
+        return True
+
     # ── pipeline hooks ────────────────────────────────────────────────
 
     @filter.on_decorating_result(priority=999)
@@ -227,6 +356,21 @@ class TextVoiceLangSplit(Star):
             and await self._suppress_duplicate_tool_text(event, result)
         ):
             return
+
+        # With `buffer_intermediate_messages` the whole tool-loop turn ships as
+        # ONE chain, so a model that repeats its sentence across steps lands the
+        # same text twice inside the same message — the cross-message
+        # suppression below can never see that. Collapse exactly the adjacent
+        # identical plain segments (tool mode + requested voice only).
+        if tool_mode and event.get_extra("_tvls_voice_requested", False):
+            logger.info(
+                "[text_voice_lang_split] Reply chain at priority 999: "
+                + " | ".join(
+                    f"{type(comp).__name__}:{len(getattr(comp, 'text', '') or '')}"
+                    for comp in result.chain
+                )
+            )
+            await self._collapse_duplicate_reply_text(event, result)
 
         # The tool-loop delivers the assistant text of every step separately.
         # Only the first one carries the reply; later ones are handled by the
@@ -281,16 +425,22 @@ class TextVoiceLangSplit(Star):
             return
 
         if tool_mode:
-            # Text only here; the voice is produced once, after the whole turn
-            # has been delivered. GENERAL_RESULT also blocks the built-in TTS,
-            # so the plugin stays the only source of audio for this message.
+            # GENERAL_RESULT blocks the built-in TTS, so the plugin stays the
+            # only source of audio for this message.
+            result.result_content_type = ResultContentType.GENERAL_RESULT
+            result.use_t2i_ = False
+            self._streaming_texts.pop(self._get_session_key(event), None)
+            if event.get_extra("_tvls_voice_requested", False) and event.get_extra(
+                "_tvls_final_seen", False
+            ):
+                # The turn's last message and the voice it asks for: wait for
+                # the audio, then ship "text, voice" as one pair.
+                if await self._ship_turn_with_voice(event, result, gate.text):
+                    return
             logger.debug(
                 "[text_voice_lang_split] Voice tool mode: delivering text only; "
                 "the voice is serviced at turn end"
             )
-            result.result_content_type = ResultContentType.GENERAL_RESULT
-            result.use_t2i_ = False
-            self._streaming_texts.pop(self._get_session_key(event), None)
             return
 
         logger.info(f"[text_voice_lang_split] Translating: '{full_text[:50]}...'")
@@ -380,11 +530,183 @@ class TextVoiceLangSplit(Star):
         if event.get_extra("_tvls_final_seen", False):
             await self._maybe_send_turn_voice(event)
 
+    async def _ship_turn_with_voice(
+        self, event: AstrMessageEvent, result, text: str
+    ) -> bool:
+        """Hold the turn's last message until the audio exists, then ship both.
+
+        Translation + TTS take a few seconds, so shipping the text first makes
+        the user watch "text … long gap … voice". Holding the text for that long
+        turns it into "text, voice" instead: same total wait, far better flow.
+
+        Returns True only when this method sent the pair itself; the caller then
+        returns with an empty result chain so the pipeline sends nothing. Every
+        other outcome (disabled, timeout, failure, no voice) returns False and
+        leaves the default flow untouched — the text must never be lost.
+        """
+        try:
+            hold_timeout = float(
+                self.config.get("hold_text_for_voice_timeout", 20.0) or 0
+            )
+        except (TypeError, ValueError):
+            hold_timeout = 0.0
+        if hold_timeout <= 0 or self._terminated:
+            return False
+        if event.get_extra("_tvls_deferred_voice_sent", False):
+            return False
+        if event.get_extra("_tvls_pipeline_delivered", None):
+            # Only a turn whose whole text is this one message can be held. If
+            # anything was already shipped, the user has seen part of the reply
+            # and holding the rest would just look broken.
+            return False
+        if not text:
+            return False
+
+        env = await voice_utils.voice_gate_env(self.context, self.config, event)
+        if not env.ok:
+            logger.info(
+                "[text_voice_lang_split] Text shipped immediately: nothing to wait "
+                f"for ({env.reason})"
+            )
+            return False
+        tts_provider = self.context.get_using_tts_provider(event.unified_msg_origin)
+        if not tts_provider:
+            return False
+
+        try:
+            voice = await asyncio.wait_for(
+                voice_utils.produce_voice_paths(
+                    self.context,
+                    self.config,
+                    event,
+                    text,
+                    tts_provider,
+                    self._tts_semaphore,
+                ),
+                timeout=hold_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[text_voice_lang_split] Voice not ready within "
+                f"{hold_timeout:g}s; shipping the text now. The turn-end service "
+                "will generate the voice again, so this turn costs one extra "
+                "translate + TTS call (raise hold_text_for_voice_timeout if it "
+                "keeps happening)"
+            )
+            return False
+
+        if not voice:
+            # Translation/TTS failed. Never retry from the turn-end service (the
+            # second attempt would fail the same way) but never lose the reply.
+            event.set_extra("_tvls_deferred_voice_sent", True)
+            logger.warning(
+                "[text_voice_lang_split] Voice generation failed while holding the "
+                "text; the reply ships without a voice"
+            )
+            return False
+
+        for path, _ in voice:
+            self._temp_manager.track(path)
+        text_chain = MessageChain(chain=list(result.chain))
+
+        # Send the text BEFORE touching the result chain: if this fails the
+        # reply must fall back to the pipeline instead of disappearing.
+        try:
+            text_sent = await self.context.send_message(
+                event.unified_msg_origin, text_chain
+            )
+        except Exception:
+            text_sent = False
+            logger.error(
+                "[text_voice_lang_split] Failed to send the held reply text",
+                exc_info=True,
+            )
+        if text_sent is False:
+            for path, _ in voice:
+                self._temp_manager.release(path)
+            logger.warning(
+                "[text_voice_lang_split] Could not ship the held reply; handing it "
+                "back to the pipeline so the text is never lost (the voice follows "
+                "as usual)"
+            )
+            return False
+
+        # The text is out: from here the pipeline must not send it again.
+        result.chain.clear()
+        event.set_extra("_tvls_deferred_voice_sent", True)
+        logger.info(
+            "[text_voice_lang_split] Shipped the held reply text "
+            f"({len(text)} chars): '{text[:60]}'"
+        )
+
+        sent_chunks = 0
+        try:
+            for path, chunk_text in voice:
+                chain = MessageChain()
+                chain.chain = [Record(file=path, url=path, text=chunk_text)]
+                await self.context.send_message(event.unified_msg_origin, chain)
+                sent_chunks += 1
+        except Exception:
+            logger.error(
+                "[text_voice_lang_split] Failed to send the held voice",
+                exc_info=True,
+            )
+            logger.warning(
+                "[text_voice_lang_split] Held voice was only partially sent "
+                f"({sent_chunks}/{len(voice)} chunk(s))"
+            )
+        finally:
+            for path, _ in voice:
+                self._temp_manager.release(path)
+
+        # The pipeline will never fire this for a message it did not send, but
+        # sibling plugins queue work for it (meme_manager flushes its images and
+        # deletes its temp files there), so releasing the pair must run it.
+        await self._notify_after_message_sent(event)
+        logger.info(
+            "[text_voice_lang_split] Shipped the turn's text and voice back-to-back "
+            f"({sent_chunks}/{len(voice)} voice chunk(s), held {len(text)} chars)"
+        )
+        return True
+
+    async def _notify_after_message_sent(self, event: AstrMessageEvent) -> None:
+        """Run the core post-send hook for the message this plugin shipped.
+
+        Only needed by the held path: the plugin sends that message itself, so
+        `RespondStage` skips it and never fires `OnAfterMessageSentEvent`. The
+        result chain is already empty by the time this runs, so the hook cannot
+        cause a duplicate send of our text.
+        """
+        if call_event_hook is None or EventType is None:  # pragma: no cover
+            logger.debug(
+                "[text_voice_lang_split] Post-send hook unavailable on this "
+                "AstrBot version; sibling plugins will miss it for held turns"
+            )
+            return
+        try:
+            await call_event_hook(event, EventType.OnAfterMessageSentEvent)
+        except Exception:
+            logger.warning(
+                "[text_voice_lang_split] Post-send hook failed for the held message",
+                exc_info=True,
+            )
+
     async def _maybe_send_turn_voice(self, event: AstrMessageEvent) -> None:
         """Send the turn's voice once, after the turn's text has been delivered.
 
         Every exit either spawns a voice or logs a WARNING with the reason, so
         a requested voice can never disappear silently.
+
+        The service requires a DECORATED delivery. With
+        `provider_settings.buffer_intermediate_messages` AstrBot ships the whole
+        tool-loop turn as one message at the very end, so the final response can
+        be produced while nothing has been delivered yet — and
+        `on_llm_response` services immediately when that response is empty.
+        Treating that window as terminal would reserve the single attempt and
+        then skip the merged message, losing the voice; answering it from the
+        `send_message_to_user` fallback would voice text the user never received
+        as the reply. Neither is acceptable, so the request stays pending until
+        a decorated delivery exists.
         """
         if not self.config.get("enable_llm_voice_tool", False):
             return
@@ -393,15 +715,18 @@ class TextVoiceLangSplit(Star):
         if not event.get_extra("_tvls_voice_requested", False):
             return
 
-        event.set_extra("_tvls_deferred_voice_sent", True)
-
+        delivered = event.get_extra("_tvls_pipeline_delivered", None) or []
         text = self.delivered_voice_text(event)
-        if not text:
+        if not text or not delivered:
             logger.warning(
-                "[text_voice_lang_split] Voice requested but no delivered text "
-                "was recorded; no voice sent"
+                "[text_voice_lang_split] Voice requested but no decorated reply "
+                "has been delivered yet; keeping the request pending"
             )
             return
+
+        # Reserve the single attempt only now: the pending window above must
+        # stay retryable, a refusal below must stay consumed.
+        event.set_extra("_tvls_deferred_voice_sent", True)
 
         try:
             env = await voice_utils.voice_gate_env(self.context, self.config, event)
@@ -418,6 +743,12 @@ class TextVoiceLangSplit(Star):
                     f"({gate.reason}: {gate.length}/{gate.max_chars} chars)"
                 )
                 return
+            # One line per serviced turn: makes the voiced text observable, so
+            # "the voice read the merged turn" can be asserted from the log.
+            logger.info(
+                "[text_voice_lang_split] Voicing the turn's delivered text "
+                f"({len(gate.text)} chars): '{gate.text[:50]}'"
+            )
             self._spawn_voice_task(
                 voice_utils.send_deferred_voice(
                     self.context,

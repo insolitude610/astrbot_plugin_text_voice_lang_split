@@ -6,6 +6,7 @@ functions with explicit dependency injection (context, config, event).
 
 import asyncio
 import os
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -188,8 +189,14 @@ async def produce_voice_paths(
     returned (callers fall back to text-only, preserving v1.9.1 behavior).
     """
     async with voice_slot(semaphore):
+        translate_started = time.monotonic()
         translated = await translate.translate_text(context, config, text, event)
+        translate_seconds = time.monotonic() - translate_started
         if not translated:
+            logger.warning(
+                "[text_voice_lang_split] Voice skipped: translation failed after "
+                f"{translate_seconds:.2f}s"
+            )
             return None
 
         if config.get("split_tts_by_sentence", False):
@@ -200,26 +207,46 @@ async def produce_voice_paths(
             chunks = [translated]
 
         paths: list[tuple[str, str]] = []
-        for chunk in chunks:
-            try:
-                path = await tts_provider.get_audio(chunk)
-            except Exception:
-                logger.error(
-                    "[text_voice_lang_split] TTS generation failed, keeping original",
-                    exc_info=True,
-                )
-                path = None
-            if not path:
-                logger.error(
-                    "[text_voice_lang_split] TTS returned empty path, skipping"
-                )
-                for p, _ in paths:
-                    try:
-                        os.remove(p)
-                    except OSError:
-                        pass
-                return None
-            paths.append((path, chunk))
+        tts_started = time.monotonic()
+        try:
+            for chunk in chunks:
+                try:
+                    path = await tts_provider.get_audio(chunk)
+                except Exception:
+                    logger.error(
+                        "[text_voice_lang_split] TTS generation failed, keeping original",
+                        exc_info=True,
+                    )
+                    path = None
+                if not path:
+                    logger.error(
+                        "[text_voice_lang_split] TTS returned empty path, skipping"
+                    )
+                    for p, _ in paths:
+                        try:
+                            os.remove(p)
+                        except OSError:
+                            pass
+                    return None
+                paths.append((path, chunk))
+        except BaseException:
+            # Cancellation (the hold path bounds this with `asyncio.wait_for`)
+            # must not leak the audio already generated.
+            for p, _ in paths:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+            raise
+        # One line per voice: the two costs that decide how long the user waits
+        # between the text bubble and the voice message.
+        logger.info(
+            "[text_voice_lang_split] Voice ready in "
+            f"{translate_seconds + (time.monotonic() - tts_started):.2f}s "
+            f"(translate={translate_seconds:.2f}s, "
+            f"tts={time.monotonic() - tts_started:.2f}s, chunks={len(paths)}, "
+            f"chars={len(translated)})"
+        )
         return paths
 
 

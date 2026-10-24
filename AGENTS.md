@@ -31,7 +31,6 @@ ResultDecorateStage → RespondStage → after_message_sent (the turn's last mes
 ## Voice tool mode (`enable_llm_voice_tool`) — the current design
 
 ### One voice owner
-
 `on_decorating_result` never voices in tool mode and always sets
 `result.result_content_type = GENERAL_RESULT` + `use_t2i_ = False`. That single
 flag does two jobs: it stops AstrBot's built-in TTS from reading the same reply
@@ -62,6 +61,51 @@ the length as **guidance**, tells the model to write the whole reply first and
 call once, and to write nothing afterwards. `main.initialize()` rebuilds it from
 the live config, so the model sees the current cap.
 
+### Holding the text until the audio exists (`hold_text_for_voice_timeout`)
+
+Translate + TTS need a few seconds, so shipping the text immediately makes the
+user watch "text … long gap … voice". When `hold_text_for_voice_timeout > 0`
+(default 20 s ≈ 3× the measured audio-ready time of **4.97–6.12 s**
+(translate 2.27–3.41 s + TTS 2.12–2.89 s, upload excluded); a timeout is
+**worse** than not holding at all because the text waits the full timeout and
+the turn then pays a second translate + TTS) **and** the decorated
+message is the turn's only one (`_tvls_final_seen` set, no
+`_tvls_pipeline_delivered` yet, voice requested, environment and cap gates pass),
+`on_decorating_result` generates the audio first (bounded by that timeout), then
+ships the text and the voice itself and clears the result chain so the pipeline
+ships nothing.
+
+Rules that keep this safe:
+
+- **The reply is never lost.** The text chain is cleared only **after**
+  `context.send_message` succeeded, and its boolean return is checked; an
+  exception or `False` hands the intact chain back to the pipeline (which then
+  ships the text and services the voice at turn end) and releases the unused
+  audio. Timeout, translation/TTS failure, missing provider and hold=0 all fall
+  through the same way. A generation failure additionally reserves
+  `_tvls_deferred_voice_sent` so the turn-end service does not retry the same
+  failing work.
+- **A timeout costs a second generation.** The fallback re-runs translate + TTS
+  at turn end; document that in the config hint instead of hiding it.
+- **Only whole turns are held.** A turn whose first bubble already shipped is
+  never held (`_tvls_pipeline_delivered` non-empty) — holding the remainder of a
+  half-delivered reply looks broken.
+- **Sibling `after_message_sent` hooks must still run.** The pipeline does not
+  fire `OnAfterMessageSentEvent` for a message a plugin sent itself, so the held
+  path calls `_notify_after_message_sent` (`call_event_hook(event,
+  EventType.OnAfterMessageSentEvent)`) after shipping the pair; otherwise
+  queued sibling work (meme images, temp-file cleanup) is dropped silently.
+- **Later decorators do not see a held message.** The plugin sends that one
+  message itself, so handlers registered after it (think tags, splitter, …) are
+  skipped for it, and so are the decorate-stage tail steps (text-to-image) and
+  the chain metadata (`use_t2i_` / `use_markdown_`). Documented trade-off, and
+  the reason the cap keeps held replies short.
+- **`_collapse_verbatim_repeat` has one accepted narrow false-positive.** A reply
+  that happens to be one sentence duplicated verbatim (≥8-char halves, seam
+  after `。？！?!~…`) is collapsed. Gating on tool mode + requested voice +
+  producible voice only lowers the odds; it is not a proof. Accepted, because
+  the alternative (a repeated sentence) is the far more common case here.
+
 ### Delivered-text accounting
 
 `after_message_sent` reads `event.get_result()` — still the chain RespondStage
@@ -90,10 +134,11 @@ logs a `WARNING` if the previous turn left a request unserved.
 
 ### Every refusal is logged
 
-The service never ends silently: missing delivered text, `voice_gate_env`
-failure, `voice_gate_text` failure (`empty` / `too_long` with both numbers),
-translation/TTS failure and a partially-sent voice all log at `WARNING`.
-A dropped voice is therefore always visible in the log.
+The service never ends silently: no decorated delivery yet (kept **pending**,
+not consumed), `voice_gate_env` failure, `voice_gate_text` failure (`empty` /
+`too_long` with both numbers), translation/TTS failure and a partially-sent
+voice all log at `WARNING`. A dropped voice is therefore always visible in the
+log.
 
 ### Invariants — do not break these
 
@@ -109,17 +154,31 @@ A dropped voice is therefore always visible in the log.
    whole deferred-voice path.
 4. **The voiced text is the delivered text, from one source.** Do not snapshot
    text at decoration time (it may be a prefix, or pre-sibling-cleanup) and do
-   not merge `send_message_to_user` text into the shipped text.
-5. **One request, at most one attempt.** Set `_tvls_deferred_voice_sent`
-   before spawning, and only in the single owner of the mode.
-6. **The plugin never rewrites user-visible content, with one narrow exception.**
+   not merge `send_message_to_user` text into the shipped text. The
+   `send_message_to_user` fallback in `delivered_voice_text()` is **never a
+   service source**: `_maybe_send_turn_voice` requires `_tvls_pipeline_delivered`
+   to be non-empty, so text the user never received as the reply is never voiced.
+5. **One request, at most one attempt — but only once there is text to speak.**
+   `_maybe_send_turn_voice` first requires a decorated delivery
+   (`_tvls_pipeline_delivered` non-empty) and only then reserves the attempt with
+   `_tvls_deferred_voice_sent`. With `buffer_intermediate_messages` the whole turn
+   ships as one message at the end, so `on_llm_response` can fire on an **empty**
+   final response while nothing has been delivered yet — that window must stay
+   **retryable** (reserving there would skip the merged message and lose the
+   voice). A refusal *after* the reservation must stay **consumed**.
+6. **The plugin never rewrites user-visible content, with two narrow exceptions.**
    Message count belongs to AstrBot (`buffer_intermediate_messages`); a plugin
-   cannot remove the pre-tool message. In tool mode with a requested voice, an
-   all-plain second message that exactly repeats the last delivered text is
-   suppressed (and the voice is serviced from the delivered text) — only when
-   the voice environment and the turn-level gate both allow a voice. Media,
-   different text and non-final messages are never touched. The duplicate
-   assistant entry stays in conversation history; the plugin does not edit it.
+   cannot remove the pre-tool message. (a) In tool mode with a requested voice,
+   an all-plain second message that exactly repeats the last delivered text is
+   suppressed (and the voice is serviced from the delivered text). (b) In the
+   same mode, a reply the model emitted twice inside ONE merged message is
+   collapsed: `_collapse_verbatim_repeat` only touches exact halves of at least
+   8 characters whose seam follows a sentence terminator (`。？！?!~…`), so
+   laughter and stutters survive; a sibling plugin (`meme_manager`, priority
+   99999) normalizes adjacent plains into one component before this hook runs,
+   so the duplicate has to be handled on the text. Both exceptions require the
+   voice environment and the turn-level gate to allow a voice, and neither ever
+   touches media, reorders content or edits conversation history.
 
 
 ## Streaming voice mechanism (v1.5.0+)

@@ -68,6 +68,7 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 | `remove_patterns` | (见默认值) | TTS 文本过滤正则规则。匹配到的内容在翻译前删除，用于过滤颜文字、装饰符号等视觉噪声 |
 | `streaming_follow_up_delay` | `1.5` | 语音跟进的延迟(秒)：流式发送完毕后、以及工具模式下最后一条文字发出后，等待此时间再发语音 |
 | `enable_llm_voice_tool` | `false` | LLM 自主判断是否发送语音。开启后注册 `tvls_send_voice` 工具；语音在**本回合最后一条文字真正发出后**作为跟进消息发送 |
+| `hold_text_for_voice_timeout` | `20` | 工具模式下，**先压住本回合的文字等语音就绪**，再「先文字、后语音」连着发（把 8.6–12.2s 的文字→语音间隔压到 1.5–3.3s）。本机实测音频就绪 4.97–6.12s，默认 20 ≈ 3 倍余量。**命中超时比不压住更差**：文字被压到超时才发，且回合末会**再生成一次**翻译+TTS（多一次调用）。0 = 关闭（文字立即发）。代价：被压住的那条不经过排在其后的装饰插件与 t2i/`use_markdown_`；它们的 `after_message_sent` 钩子仍会被补发 |
 
 **Provider 优先级：** `translate_provider`（手动指定）> 聊天 `/provider` 切换 > 默认 Provider。
 
@@ -78,10 +79,16 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 工具模式（`enable_llm_voice_tool=true`）下的行为，请按这份契约理解：
 
 1. **工具不承诺送达。** `tvls_send_voice` 只记录"本轮想要语音"；它运行在回复产生**之前**，无法预知最终长度。工具只在两种确定的情况下拒绝：语音环境不可用（会话开关关闭 / 无 TTS Provider / 全局 TTS 关闭 / 会话 TTS 被关），或**已经送达**的文本已超上限。其余情况返回"请求已记录"。
-2. **只有一个语音来源。** 装饰阶段只发文字，并设 `GENERAL_RESULT` 阻断内置 TTS，所以同一句话不会被读两遍。语音在回合最后一条文字真正投递后（`after_message_sent`）才生成，朗读的是**本回合累计投递的文本**（多步工具回合会把前后几条文字合成一次朗读，cap 也按累计计），超限则跳过并记 `WARNING`。若工具返回后模型重复了同一句，且语音可以正常生成，重复的那条会被抑制，语音改从已投递的那条立即服务（仍然只读一遍）。
-3. **只有完全重复的 post-tool 文本会被抑制。** 默认配置（`buffer_intermediate_messages=false`）下，AstrBot 会把工具调用前的回复和工具后的消息投递成两条独立消息。工具模式 + 已请求语音时，若第二条是**纯文本**、且与最后一条已投递文本**完全相同**、并且语音环境与长度 gate 都允许，插件会清空第二条（不发），由已投递文本服务语音；其它情况（不同文本、带图片/媒体、语音不可用、不是最终步骤的重复、`reply_prefix` 非空、转发/分段、`send_message_to_user` 代发导致首条被跳过等）保持原有行为。历史里仍会保存模型重复的 assistant 记录，插件不改历史。被抑制的消息不会再触发 `after_message_sent`，因此其它插件在该钩子里为这条重复消息排队的内容（以及它们的临时文件清理）也不会执行。已知边界：AstrBot 的首条发送异常仍会触发 `after_message_sent`，此时记录里算已投递，抑制可能生效（插件拿不到真实的送达信号）。工具未开启或未请求语音时完全不介入。想要“一回合一条文字 + 至多一条语音”，可同时开启 AstrBot → Provider 设置 → **合并 Agent 中间消息**（`buffer_intermediate_messages`，仅非流式）；注意在当前 `turn_off` 策略 + 不支持流式的平台上该合并本身不会生效，需把 `unsupported_streaming_strategy` 改为非 `turn_off`，且合并后的重复文本不在本抑制范围内。
-4. **已知排除项**（插件看不到或不会朗读的文本）：`tool_direct_result` 直发的消息、平台侧丢弃的消息、`platform_settings.forward_threshold` 过长触发的**合并转发**（链里没有纯文本）、以及开启「输出工具调用信息」时核心直发的工具状态消息。
-5. **内联路径（工具关闭）** 仍在装饰阶段取文本，读到的是其它插件清洗**之前**的内容。若你同时使用思考标签清理类插件，建议改用工具模式，或把对应正则补进 `remove_patterns`。
+2. **只有一个语音来源。** 装饰阶段只发文字，并设 `GENERAL_RESULT` 阻断内置 TTS，所以同一句话不会被读两遍。语音在回合最后一条文字真正投递后（`after_message_sent`）才生成，朗读的是**本回合累计投递的文本**（多步工具回合会把前后几条文字合成一次朗读，cap 也按累计计），超限则跳过并记 `WARNING`。服务的前提是**确实有装饰投递**（`_tvls_pipeline_delivered` 非空）：没有投递（含最终响应为空、文字还在核心缓冲区里）时请求**保持待发**并记一条 `WARNING`，等下一次投递再服务；`send_message_to_user` 发出去的内容不算回复，不会被朗读。若工具返回后模型重复了同一句，且语音可以正常生成，重复的那条会被抑制，语音改从已投递的那条立即服务（仍然只读一遍）。
+3. **只有完全重复的 post-tool 文本会被抑制。** 默认配置（`buffer_intermediate_messages=false`）下，AstrBot 会把工具调用前的回复和工具后的消息投递成两条独立消息。工具模式 + 已请求语音时，若第二条是**纯文本**、且与最后一条已投递文本**完全相同**、并且语音环境与长度 gate 都允许，插件会清空第二条（不发），由已投递文本服务语音；其它情况（不同文本、带图片/媒体、语音不可用、不是最终步骤的重复、`reply_prefix` 非空、转发/分段、`send_message_to_user` 代发导致首条被跳过等）保持原有行为。历史里仍会保存模型重复的 assistant 记录，插件不改历史。被抑制的消息不会再触发 `after_message_sent`，因此其它插件在该钩子里为这条重复消息排队的内容（以及它们的临时文件清理）也不会执行。已知边界：AstrBot 的首条发送异常仍会触发 `after_message_sent`，此时记录里算已投递，抑制可能生效（插件拿不到真实的送达信号）。工具未开启或未请求语音时完全不介入。**合并模式（下一条）下同一件事换成另一种形态**：模型的两次重复会被并进同一条消息，而且 `meme_manager` 之类先于本插件运行的装饰插件会把相邻纯文本段规范化成一段，所以插件改为按**文本**折叠——只折叠「完整一句话原样重复一遍」（两个半段逐字符相同、每半段 ≥8 字、接缝前那个字符是 `。？！?!~…`），「哈哈哈…」「好的好的」这类不会被误伤；折叠同样要求工具模式 + 已请求语音 + 语音可生成，否则原样保留并记 `INFO`。历史里仍保存模型重复的 assistant 记录，插件不改历史。
+4. **想要「一回合一条文字 + 至多一条语音」= 打开核心的中间消息合并。** 在**当前生效的配置档**里同时设置三个键（缺一无效）：
+   - `provider_settings.buffer_intermediate_messages: true`（合并 Agent 中间消息）
+   - `provider_settings.streaming_response: false`（合并只在**非流式**生效；同时避免在没有流式实现的适配器上走 `STREAMING_RESULT`）
+   - `provider_settings.unsupported_streaming_strategy: "realtime_segmenting"`（若仍是 `turn_off`，加上 aiocqhttp 这类 `support_streaming_message=False` 的平台会让 `stream_to_general=True`，**合并直接不生效**）
+
+   改文件后**必须重启** AstrBot（`_load_all_configs` 只在启动时执行；WebUI 保存才会热生效，但流式关闭时那个策略下拉被 schema 的 `condition` 隐藏，面板上点不出来）。生效范围是所有走该配置档、且适配器没有自行塞 `enable_streaming` extra 的平台（`webchat` 会强制流式，因此不受影响、也不会合并）。副作用：该档下**非语音回合**的文字改为回合结束一次性发出；**语音回合**若开了 `hold_text_for_voice_timeout`，则由本插件在装饰阶段末尾等音频就绪后自行发出（不再由管线发）。合并后的多段文本首尾相接，插件不加分隔符，也不会去重（v1.13.1 的抑制只处理跨消息重复；工具模式下的同句重复由 v1.13.2 的文本折叠处理）。
+5. **已知排除项**（插件看不到或不会朗读的文本）：`tool_direct_result` 直发的消息、平台侧丢弃的消息、`platform_settings.forward_threshold` 过长触发的**合并转发**（链里没有纯文本）、以及开启「输出工具调用信息」时核心直发的工具状态消息。
+6. **内联路径（工具关闭）** 仍在装饰阶段取文本，读到的是其它插件清洗**之前**的内容。若你同时使用思考标签清理类插件，建议改用工具模式，或把对应正则补进 `remove_patterns`。
 
 ### 情绪标记档位怎么选
 
