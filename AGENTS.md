@@ -12,6 +12,14 @@ AstrBot plugin that translates LLM text before TTS, enabling display in one lang
 
 Key: `on_decorating_result` does NOT fire for `STREAMING_RESULT`. `after_message_sent` does NOT fire for `STREAMING_RESULT` either (RespondStage returns before dispatch), so streaming keeps its own owner.
 
+Consequence: every outbound change on the streaming path has to happen inside the
+patched `event.send_streaming` — that wrapper is the last hook before the platform
+adapter. It currently drops two things (v1.13.3): AstrBot's benign
+`EmptyModelOutputError` chain (the "LLM 响应错误: ... empty model output" tail
+appended after a deliberately silent tool turn) and the reply the model re-emits
+after `tvls_send_voice` (same policy as `_suppress_duplicate_tool_text`, which
+still covers the non-streaming path).
+
 Note: QQ个人号 buffers streaming API text and sends all at once — AstrBot treats this as non-streaming, so `on_decorating_result` fires.
 
 ## Pipeline hook order

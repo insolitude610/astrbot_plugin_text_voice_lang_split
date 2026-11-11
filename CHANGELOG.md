@@ -6,8 +6,9 @@
 - **修复：流式下模型"说完再重复一遍"会发两遍。** 工具模式里模型经常在 `tvls_send_voice` 前后各写一遍同样的正文（实测那一轮就是 `#61 正文 + tool_call` / `#63 同一句正文`）。非流式有 `_suppress_duplicate_tool_text` 兜着，而流式结果根本不走装饰阶段，于是原样发了两遍。现在在 `send_streaming` 包装器里做同样的去重：已请求语音的回合，后续文本如果仍然**逐字符是已发出文本的前缀**就先扣住；流结束时完全相等就丢掉并记一条 INFO，一旦与已发出文本分叉就立刻放行，真正的新内容照常流式发出。
 - **改在唯一的可拦截点：`send_streaming` 包装器。** 流式结果绕过 `ResultDecorateStage`（`result_decorate` 对 `STREAMING_RESULT` 直接 return），装饰阶段剪不掉；而本插件本来就在 `on_llm_request` 里包装了 `event.send_streaming`，在交给平台适配器前把这条错误链**吞掉**即可。非流式路径在 `on_decorating_result` 里做同样的事（`event.clear_result()`）。
 - **只吞"空输出"这一种。** 匹配 `EmptyModelOutputError` / `no usable output` 两个标记；超时、403、余额不足、500 等真实故障**照常显示**，用户仍然知道出了什么事。
-- **顺带修好这一轮的语音。** 之前这种回合 `on_llm_response` 拿到的是错误响应，`_streaming_texts` 里没有正文（实测那一轮日志里也确实没有 `Voice ready`），语音直接丢了。吞掉错误链时顺手把本回合**实际已发出**的文本交给 `send_streaming_follow_up`，语音照常补发；没有文本时清掉该键，避免把错误文案念出来。
-- **可观测**：每吞一次记一条 INFO（`Dropped AstrBot's benign 'empty model output' error message`），不静默。
+- **顺带修好这一轮的语音。** 之前这种回合 `on_llm_response` 拿到的是错误响应（或那份随后被丢掉的重复文本），`_streaming_texts` 里不是用户真正看到的正文（实测 16:11 那一轮日志里也确实没有 `Voice ready`），语音要么丢失、要么可能念错。现在无论是吞掉错误链还是丢掉重复，都会把本回合**实际已发出**的文本交给 `send_streaming_follow_up`，语音照常补发；没有文本就清掉该键，避免把错误文案念出来。
+- **可观测**：吞错误链记 `Dropped AstrBot's benign 'empty model output' error message`，丢重复记 `Dropped the reply the model re-emitted after the voice tool`，都不静默。
+- **测试**：`tests/test_smoke.py` 新增 4 条流式用例（重复被吞、真正的新内容照常放行、空输出错误链被吞、真实 LLM 错误照常显示）共 54/54 通过；`tests/test_benign_error_filter.py` 7/7；`tests/test_voice_tool.py` 18/18。
 
 ## v1.13.2
 
