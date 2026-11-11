@@ -41,6 +41,36 @@ from .tools.voice_tool import build_description
 _SENTENCE_ENDINGS = "。？！?!~…"
 _MIN_REPEAT_HALF = 8
 
+# AstrBot treats an empty model completion as a hard failure
+# (`EmptyModelOutputError`) and appends "LLM 响应错误: All chat models failed: ..."
+# to the turn's reply. In voice-tool mode the model is *instructed* to stay
+# silent after `tvls_send_voice`, so such a completion is the protocol working
+# as designed and the turn's text has already been delivered. Only the
+# empty-output flavour is dropped; every other LLM error still reaches the user.
+_BENIGN_EMPTY_OUTPUT_MARKERS = ("EmptyModelOutputError", "no usable output")
+
+
+def _chain_plain_text(chain) -> str:
+    """Plain text of a MessageChain, or of a raw component list (best effort)."""
+    getter = getattr(chain, "get_plain_text", None)
+    if callable(getter):
+        try:
+            return getter() or ""
+        except Exception:
+            return ""
+    parts: list[str] = []
+    for comp in chain or []:
+        text = getattr(comp, "text", None)
+        if isinstance(text, str):
+            parts.append(text)
+    return "".join(parts)
+
+
+def _is_benign_empty_output(chain) -> bool:
+    """True when `chain` carries AstrBot's "the model returned nothing" error."""
+    text = _chain_plain_text(chain)
+    return bool(text) and any(m in text for m in _BENIGN_EMPTY_OUTPUT_MARKERS)
+
 
 def _collapse_verbatim_repeat(text: str) -> str:
     """Turn `X + X` into `X` when X is one sentence repeated verbatim.
@@ -330,6 +360,14 @@ class TextVoiceLangSplit(Star):
         if not result or not result.chain:
             return
 
+        if _is_benign_empty_output(result.chain):
+            logger.info(
+                "[text_voice_lang_split] Dropped AstrBot's benign 'empty model "
+                "output' error message; this turn's text was already delivered"
+            )
+            event.clear_result()
+            return
+
         if not result.is_llm_result():
             return
 
@@ -482,10 +520,106 @@ class TextVoiceLangSplit(Star):
 
         async def _patched(stream, *args, **kwargs):
             stream_ok = False
+            delivered: list[str] = []
+            swallowed = False
+            dropped_repeat = False
+
+            async def _filtered(inner):
+                """Filter what the platform receives during a streamed turn.
+
+                Streaming results bypass ResultDecorateStage entirely, so this
+                wrapper is the only seam where a plugin can still change what
+                the platform receives. Two things are dropped here:
+
+                1. AstrBot's benign "empty model output" error chain — in voice
+                   tool mode the model is *told* to stay silent after the tool,
+                   so that empty completion is the protocol working as
+                   designed, not a failure.
+                2. The reply the model re-emits after the tool call. The same
+                   suppression exists for non-streaming turns in
+                   `_suppress_duplicate_tool_text`, but decoration never runs
+                   for streaming. Repeat chunks stay held only while they still
+                   match a prefix of the text the user already read, so genuine
+                   new text flows straight through.
+                """
+                nonlocal swallowed, dropped_repeat
+                # Held chains stay in their original form: replaying the real
+                # chains (not a rebuilt MessageChain) keeps the adapter's
+                # per-chain handling intact.
+                held: list[tuple[object, str]] = []
+
+                async for chain in inner:
+                    if _is_benign_empty_output(chain):
+                        swallowed = True
+                        logger.info(
+                            "[text_voice_lang_split] Dropped AstrBot's benign "
+                            "'empty model output' error message; this turn's "
+                            "text was already delivered"
+                        )
+                        continue
+
+                    if getattr(chain, "type", "") in {
+                        "break",
+                        "reasoning",
+                        "audio_chunk",
+                        "tool_call",
+                        "agent_stats",
+                    }:
+                        yield chain
+                        continue
+
+                    piece = _chain_plain_text(chain)
+                    already = "".join(delivered).strip()
+                    looks_like_repeat = (
+                        bool(piece.strip())
+                        and bool(already)
+                        and bool(event.get_extra("_tvls_voice_requested", False))
+                        and already.startswith(
+                            ("".join(held_piece for _, held_piece in held) + piece).strip()
+                        )
+                    )
+                    if looks_like_repeat:
+                        held.append((chain, piece))
+                        continue
+
+                    while held:
+                        held_chain, held_piece = held.pop(0)
+                        if held_piece.strip():
+                            delivered.append(held_piece)
+                        yield held_chain
+
+                    if piece.strip():
+                        delivered.append(piece)
+                    yield chain
+
+                if held:
+                    repeat_text = "".join(held_piece for _, held_piece in held)
+                    if repeat_text.strip() == "".join(delivered).strip():
+                        dropped_repeat = True
+                        logger.info(
+                            "[text_voice_lang_split] Dropped the reply the model "
+                            "re-emitted after the voice tool; the user already read it"
+                        )
+                    else:
+                        while held:
+                            held_chain, held_piece = held.pop(0)
+                            if held_piece.strip():
+                                delivered.append(held_piece)
+                            yield held_chain
+
             try:
-                await original(stream, *args, **kwargs)
+                await original(_filtered(stream), *args, **kwargs)
                 stream_ok = True
             finally:
+                if swallowed or dropped_repeat:
+                    # Whatever on_llm_response seeded is either the error text or
+                    # the repeat that was just dropped: voice exactly what the
+                    # user actually read.
+                    text = "".join(delivered).strip()
+                    if text:
+                        self._streaming_texts[event.unified_msg_origin] = text
+                    else:
+                        self._streaming_texts.pop(event.unified_msg_origin, None)
                 await voice_utils.send_streaming_follow_up(
                     self.context,
                     self.config,

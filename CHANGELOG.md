@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.13.3
+
+- **修复：模型"守规矩"时，AstrBot 会把 `LLM 响应错误: All chat models failed: EmptyModelOutputError...` 追加到本轮回复末尾。** 工具模式要求模型在 `tvls_send_voice` 之后不再输出文字，模型偶尔真的照做：最终 completion 是 `content=''`、`completion_tokens=0`、`finish_reason='stop'`。AstrBot 把这种**空输出**当成硬失败（`EmptyModelOutputError`），按 provider 逐个重试 + fallback 耗尽后拼出上面那句错误，并在流式输出里**接在已经发出的正文后面**。本插件协议的产物被上游判成故障，与模型/网络是否正常无关（三家 provider 同时返回 `content=''` 就是证据）。
+- **修复：流式下模型"说完再重复一遍"会发两遍。** 工具模式里模型经常在 `tvls_send_voice` 前后各写一遍同样的正文（实测那一轮就是 `#61 正文 + tool_call` / `#63 同一句正文`）。非流式有 `_suppress_duplicate_tool_text` 兜着，而流式结果根本不走装饰阶段，于是原样发了两遍。现在在 `send_streaming` 包装器里做同样的去重：已请求语音的回合，后续文本如果仍然**逐字符是已发出文本的前缀**就先扣住；流结束时完全相等就丢掉并记一条 INFO，一旦与已发出文本分叉就立刻放行，真正的新内容照常流式发出。
+- **改在唯一的可拦截点：`send_streaming` 包装器。** 流式结果绕过 `ResultDecorateStage`（`result_decorate` 对 `STREAMING_RESULT` 直接 return），装饰阶段剪不掉；而本插件本来就在 `on_llm_request` 里包装了 `event.send_streaming`，在交给平台适配器前把这条错误链**吞掉**即可。非流式路径在 `on_decorating_result` 里做同样的事（`event.clear_result()`）。
+- **只吞"空输出"这一种。** 匹配 `EmptyModelOutputError` / `no usable output` 两个标记；超时、403、余额不足、500 等真实故障**照常显示**，用户仍然知道出了什么事。
+- **顺带修好这一轮的语音。** 之前这种回合 `on_llm_response` 拿到的是错误响应，`_streaming_texts` 里没有正文（实测那一轮日志里也确实没有 `Voice ready`），语音直接丢了。吞掉错误链时顺手把本回合**实际已发出**的文本交给 `send_streaming_follow_up`，语音照常补发；没有文本时清掉该键，避免把错误文案念出来。
+- **可观测**：每吞一次记一条 INFO（`Dropped AstrBot's benign 'empty model output' error message`），不静默。
+
 ## v1.13.2
 
 - **修复：开启 `buffer_intermediate_messages` 后，某个守规矩的回合可能一句语音都收不到。** 合并模式下整回合文字在 `agent_runner.done()` 之后才作为**一条**消息投递；若模型遵守工具协议（工具返回后不再输出文字），最终响应文本为空，`on_llm_response` 会立刻服务语音——此刻 `_tvls_pipeline_delivered` 还是空的。旧实现在这条分支里**已经**置了 `_tvls_deferred_voice_sent`，随后那条合并消息的 `after_message_sent` 因标记被跳过，请求被"消费成成功"却从未发出。
