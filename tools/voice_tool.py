@@ -122,12 +122,16 @@ _UNAVAILABLE = (
 )
 
 # The result text never tells the model to stop writing: the reply is expected to
-# be complete before the call, and the voice is delivered by the system as its own
-# message. v1.13.3 said "do not write anything else", which upstream providers
-# turned into an empty completion (see the blame-split experiment).
+# be complete before the call, and delivery is the system's business. v1.13.3 said
+# "do not write anything else", which upstream providers turned into an empty
+# completion (see the blame-split experiment).
+#
+# It must also not read as a promise: "when it can" keeps it aligned with the
+# description's "Never tell the user a voice is coming, and never apologise for a
+# voice that was not sent" — the system still decides, and may skip it.
 _QUEUED = (
-    "Voice request recorded. The voice is delivered by the system as a separate "
-    "message."
+    "Voice request recorded. The system sends the voice as a separate message "
+    "when it can."
 )
 
 

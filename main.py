@@ -48,10 +48,15 @@ _MIN_REPEAT_HALF = 8
 # designed and the turn's text has already been delivered.
 #
 # The provider swallows the exception (`openai_source.py:696-703`) and the runner
-# then ends the candidate list, so the user sees ONE of exactly two terminal
-# texts (or, on the escape path, the wrapped marker). The v1.13.3 filter looked
-# for `EmptyModelOutputError` / `no usable output` as substrings, which are NOT
-# on that path: it fired 0 times in production.
+# then ends the candidate list, so on the no-persona-error path the user sees the
+# bare `All available chat models are unavailable.`, and on the escape path the
+# wrapped `All chat models failed: EmptyModelOutputError: ...`. The v1.13.3 filter
+# looked for `EmptyModelOutputError` / `no usable output` as substrings, which are
+# NOT on that path: it fired 0 times in production.
+#
+# A persona-level `custom_error_message` replaces the whole text with arbitrary
+# user-authored wording (`tool_loop_agent_runner.py:912-915`). Such a turn simply
+# does not match the family and keeps its error visible — fail-open by design.
 #
 # This filter is deliberately narrower than its predecessor on every axis:
 #   * anchored `fullmatch` + all-`Plain` ⇒ a chain that also carries body text
@@ -110,6 +115,23 @@ def _is_benign_empty_tail(chain) -> bool:
         return False
     text = "".join((getattr(comp, "text", None) or "") for comp in comps)
     return bool(_FAMILY_TAIL_RE.fullmatch(text))
+
+
+def _delivered_text_extra(event) -> str:
+    """The turn's already-shipped body text, joined, from `_tvls_pipeline_delivered`.
+
+    The extra is a list of segments written by `_record_delivered_text`. A list
+    guard mirrors `delivered_voice_text()`: iterating a bare string here would
+    join it character by character and make the "body already delivered" gate
+    fire on text the user never saw.
+    """
+    getter = getattr(event, "get_extra", None)
+    if not callable(getter):
+        return ""
+    recorded = getter("_tvls_pipeline_delivered", None) or []
+    if not isinstance(recorded, list):
+        return ""
+    return " ".join(str(t).strip() for t in recorded if str(t).strip())
 
 
 def _should_swallow_empty_tail(chain, *, voice_requested: bool, delivered_text) -> bool:
@@ -421,10 +443,7 @@ class TextVoiceLangSplit(Star):
         if _should_swallow_empty_tail(
             result.chain,
             voice_requested=bool(event.get_extra("_tvls_voice_requested", False)),
-            delivered_text=" ".join(
-                str(t)
-                for t in (event.get_extra("_tvls_pipeline_delivered", None) or [])
-            ),
+            delivered_text=_delivered_text_extra(event),
         ):
             logger.warning(
                 "[text_voice_lang_split] Dropped AstrBot's benign 'empty model "

@@ -231,6 +231,11 @@ Known boundaries:
   is produced by a sibling plugin editing the chain (`combine_messages` in this
   install), not by core, and trimming it would mean rewriting user-visible text.
   Left visible on purpose.
+- **`buffer_intermediate_messages=true` + non-streaming under-swallows.** The body
+  is buffered and flushed *after* the error chain (`astr_agent_run_util.py:274-309`),
+  so condition 3 reads empty and the tail stays visible. That direction is safe
+  (never over-swallows) and the live install is streaming anyway
+  (`support_streaming_message` defaults True), so it is recorded rather than fixed.
 - Hit rate in this install is unmeasured: the family texts never reached either
   seam in the 5 days of log available. This is a defensive fix for the observed
   terminal texts, not a measured regression fix.
@@ -428,7 +433,7 @@ after registration is effective. Toggle `tool.active` to show/hide from the LLM.
 
 ## Tests
 
-Nine test suites, all in `tests/` (gitignored). They must run against the
+Ten test suites, all in `tests/` (gitignored). They must run against the
 **production** modules — v1.13.0 rewrote `tests/test_voice_tool.py` and
 `tests/test_smoke.py` because the old harness copied the tool implementation and
 used a synchronous `MagicMock` for `get_audio`, so a swallowed `TypeError` (and
@@ -451,7 +456,8 @@ $py = "D:\AstrBotLauncher-0.1.5.5\AstrBot\venv\Scripts\python.exe"
 foreach ($t in @("test_translation_context.py", "test_split_parity.py",
                  "test_translation_prompt.py", "test_phase2.py", "test_smoke.py",
                  "test_split_and_toggle.py", "test_voice_tool.py",
-                 "test_filter_text_for_tts.py", "test_strip_thinking.py")) {
+                 "test_filter_text_for_tts.py", "test_strip_thinking.py",
+                 "test_benign_error_filter.py")) {
   & $py "tests\$t"
 }
 
