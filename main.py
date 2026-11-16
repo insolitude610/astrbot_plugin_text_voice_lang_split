@@ -55,8 +55,11 @@ _MIN_REPEAT_HALF = 8
 # NOT on that path: it fired 0 times in production.
 #
 # A persona-level `custom_error_message` replaces the whole text with arbitrary
-# user-authored wording (`tool_loop_agent_runner.py:912-915`). Such a turn simply
-# does not match the family and keeps its error visible — fail-open by design.
+# user-authored wording (`tool_loop_agent_runner.py:912-915`). Arbitrary wording
+# cannot match the anchored family and keeps its error visible (fail-open). The
+# one way through is an operator pasting a family text byte-for-byte as their
+# persona fallback wording — accepted, since it is then literally the same string
+# the family exists to drop.
 #
 # This filter is deliberately narrower than its predecessor on every axis:
 #   * anchored `fullmatch` + all-`Plain` ⇒ a chain that also carries body text
@@ -123,12 +126,11 @@ def _delivered_text_extra(event) -> str:
     The extra is a list of segments written by `_record_delivered_text`. A list
     guard mirrors `delivered_voice_text()`: iterating a bare string here would
     join it character by character and make the "body already delivered" gate
-    fire on text the user never saw.
+    fire on text the user never saw. The read goes through
+    `context_utils._event_extra` so a raising `get_extra` degrades to "nothing
+    delivered" instead of escaping the decorate stage.
     """
-    getter = getattr(event, "get_extra", None)
-    if not callable(getter):
-        return ""
-    recorded = getter("_tvls_pipeline_delivered", None) or []
+    recorded = context_utils._event_extra(event, "_tvls_pipeline_delivered", None) or []
     if not isinstance(recorded, list):
         return ""
     return " ".join(str(t).strip() for t in recorded if str(t).strip())
