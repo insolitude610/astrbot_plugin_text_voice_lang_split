@@ -61,13 +61,26 @@ length. It therefore:
   (`voice_gate_env`), or already-delivered text already over `tts_max_chars`
   (monotonic);
 - otherwise records `_tvls_voice_requested` and answers "Voice request
-  recorded." — never "will be sent";
+  recorded. The system sends the voice as a separate message when it can." —
+  the "when it can" is load-bearing: without it the result text becomes a
+  delivery promise, which the description's item 5 forbids the model to make;
 - is idempotent: a second call is refused without changing state.
+
+The result texts must never contain a "stop writing" order (v1.13.3 shipped
+`"…Do not write anything else."`; upstream providers turned that instruction
+into an empty completion — see the blame-split experiment). `tests/test_voice_tool.py`
+asserts their absence in every result text and pins the required leftovers
+("do not call this tool again", "do not promise a voice").
 
 The description (`build_description(max_chars)` in `tools/voice_tool.py`) states
 the length as **guidance**, tells the model to write the whole reply first and
 call once, and to write nothing afterwards. `main.initialize()` rebuilds it from
 the live config, so the model sees the current cap.
+**Its item 4 (`"After the tool result, output no further text."`) is deliberately
+left unchanged in v1.13.4**, together with its delivery-toned second sentence:
+the blame-split experiment held the `tools` definition constant, so no evidence
+exists about what changing it does to the empty-completion rate, and it is
+model-visible prompt text. Recorded as a known residue in `CHANGELOG.md`.
 
 ### Holding the text until the audio exists (`hold_text_for_voice_timeout`)
 
