@@ -1,4 +1,5 @@
 import asyncio
+import re
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import MessageChain, filter
@@ -42,12 +43,31 @@ _SENTENCE_ENDINGS = "。？！?!~…"
 _MIN_REPEAT_HALF = 8
 
 # AstrBot treats an empty model completion as a hard failure
-# (`EmptyModelOutputError`) and appends "LLM 响应错误: All chat models failed: ..."
-# to the turn's reply. In voice-tool mode the model is *instructed* to stay
-# silent after `tvls_send_voice`, so such a completion is the protocol working
-# as designed and the turn's text has already been delivered. Only the
-# empty-output flavour is dropped; every other LLM error still reaches the user.
-_BENIGN_EMPTY_OUTPUT_MARKERS = ("EmptyModelOutputError", "no usable output")
+# (`EmptyModelOutputError`). In voice-tool mode the model is *instructed* to stay
+# silent after `tvls_send_voice`, so such a completion is the protocol working as
+# designed and the turn's text has already been delivered.
+#
+# The provider swallows the exception (`openai_source.py:696-703`) and the runner
+# then ends the candidate list, so the user sees ONE of exactly two terminal
+# texts (or, on the escape path, the wrapped marker). The v1.13.3 filter looked
+# for `EmptyModelOutputError` / `no usable output` as substrings, which are NOT
+# on that path: it fired 0 times in production.
+#
+# This filter is deliberately narrower than its predecessor on every axis:
+#   * anchored `fullmatch` + all-`Plain` ⇒ a chain that also carries body text
+#     (same `Plain` or a preceding one) can never match, so a reply is never
+#     lost;
+#   * only these two texts are on the family ⇒ every other
+#     `All chat models failed: <ExcType>` is a REAL failure and stays visible.
+# The all-`Plain` requirement also keeps media chains out of reach.
+_FAMILY_TAIL_RE = re.compile(
+    r"\s*(?:LLM 响应错误[:：]\s*)?(?:"
+    r"All available chat models are unavailable\.?"
+    r"|All chat models failed[:：]\s*EmptyModelOutputError\b.*"
+    r"|(?:OpenAI )?completion has no usable output\b.*"
+    r")\s*",
+    re.DOTALL | re.IGNORECASE,
+)
 
 
 def _chain_plain_text(chain) -> str:
@@ -66,10 +86,48 @@ def _chain_plain_text(chain) -> str:
     return "".join(parts)
 
 
-def _is_benign_empty_output(chain) -> bool:
-    """True when `chain` carries AstrBot's "the model returned nothing" error."""
-    text = _chain_plain_text(chain)
-    return bool(text) and any(m in text for m in _BENIGN_EMPTY_OUTPUT_MARKERS)
+def _chain_components(chain) -> list:
+    """Components of a MessageChain, or of a raw component list."""
+    comps = getattr(chain, "chain", chain)
+    try:
+        return list(comps or [])
+    except TypeError:
+        return []
+
+
+def _is_benign_empty_tail(chain) -> bool:
+    """True only when the WHOLE chain is exactly a "the model stayed silent" tail.
+
+    Matching requires every component to be `Plain` and the concatenation of
+    their texts to be family-exact, so any body text — whether in the same
+    `Plain` or a preceding one — makes the chain unmatchable. That is what makes
+    "never delete a user's reply" a property of the shape rather than of a guard.
+    """
+    comps = _chain_components(chain)
+    if not comps:
+        return False
+    if not all(isinstance(comp, Plain) for comp in comps):
+        return False
+    text = "".join((getattr(comp, "text", None) or "") for comp in comps)
+    return bool(_FAMILY_TAIL_RE.fullmatch(text))
+
+
+def _should_swallow_empty_tail(chain, *, voice_requested: bool, delivered_text) -> bool:
+    """Decide whether to drop `chain`, the single gate both call sites share.
+
+    Three conditions must hold together; anything else is left untouched:
+
+    1. the whole chain is a benign tail (see `_is_benign_empty_tail`);
+    2. the model asked for a voice this turn;
+    3. the turn already delivered body text, so the user is not left with only
+       an error message. On a cold turn the text stays visible: a silent turn is
+       the real failure and the operator must see it.
+    """
+    if not voice_requested:
+        return False
+    if not str(delivered_text or "").strip():
+        return False
+    return _is_benign_empty_tail(chain)
 
 
 def _collapse_verbatim_repeat(text: str) -> str:
@@ -360,10 +418,20 @@ class TextVoiceLangSplit(Star):
         if not result or not result.chain:
             return
 
-        if _is_benign_empty_output(result.chain):
-            logger.info(
+        if _should_swallow_empty_tail(
+            result.chain,
+            voice_requested=bool(event.get_extra("_tvls_voice_requested", False)),
+            delivered_text=" ".join(
+                str(t)
+                for t in (event.get_extra("_tvls_pipeline_delivered", None) or [])
+            ),
+        ):
+            logger.warning(
                 "[text_voice_lang_split] Dropped AstrBot's benign 'empty model "
-                "output' error message; this turn's text was already delivered"
+                "output' tail (voice requested, body already delivered) "
+                f"umo={event.unified_msg_origin} delivered_chars="
+                f"{len(self.delivered_voice_text(event))} dropped="
+                f"{_chain_plain_text(result.chain)[:200]!r}"
             )
             event.clear_result()
             return
@@ -549,12 +617,21 @@ class TextVoiceLangSplit(Star):
                 held: list[tuple[object, str]] = []
 
                 async for chain in inner:
-                    if _is_benign_empty_output(chain):
+                    if _should_swallow_empty_tail(
+                        chain,
+                        voice_requested=bool(
+                            event.get_extra("_tvls_voice_requested", False)
+                        ),
+                        delivered_text="".join(delivered),
+                    ):
                         swallowed = True
-                        logger.info(
+                        logger.warning(
                             "[text_voice_lang_split] Dropped AstrBot's benign "
-                            "'empty model output' error message; this turn's "
-                            "text was already delivered"
+                            "'empty model output' tail (voice requested, body "
+                            "already delivered) "
+                            f"umo={event.unified_msg_origin} "
+                            f"delivered_chars={len(''.join(delivered).strip())} "
+                            f"dropped={_chain_plain_text(chain)[:200]!r}"
                         )
                         continue
 
@@ -575,7 +652,9 @@ class TextVoiceLangSplit(Star):
                         and bool(already)
                         and bool(event.get_extra("_tvls_voice_requested", False))
                         and already.startswith(
-                            ("".join(held_piece for _, held_piece in held) + piece).strip()
+                            (
+                                "".join(held_piece for _, held_piece in held) + piece
+                            ).strip()
                         )
                     )
                     if looks_like_repeat:

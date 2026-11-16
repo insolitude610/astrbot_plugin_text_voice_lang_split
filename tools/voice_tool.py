@@ -114,16 +114,21 @@ _REFUSAL_BY_REASON = {
 }
 
 _ALREADY_REQUESTED = (
-    "A voice was already requested for this reply. Do not call this tool again "
-    "and do not write anything else."
+    "A voice was already requested for this reply. Do not call this tool again."
 )
 
 _UNAVAILABLE = (
-    "Voice is unavailable right now, so no voice will be sent. Do not promise a "
-    "voice and do not write anything else."
+    "Voice is unavailable right now, so no voice will be sent. Do not promise a voice."
 )
 
-_QUEUED = "Voice request recorded. Do not write anything else."
+# The result text never tells the model to stop writing: the reply is expected to
+# be complete before the call, and the voice is delivered by the system as its own
+# message. v1.13.3 said "do not write anything else", which upstream providers
+# turned into an empty completion (see the blame-split experiment).
+_QUEUED = (
+    "Voice request recorded. The voice is delivered by the system as a separate "
+    "message."
+)
 
 
 @dataclass
@@ -181,7 +186,7 @@ class VoiceTool(FunctionTool[AstrAgentContext]):
                             "Voice will NOT be sent: the text already delivered "
                             f"is {gate.length} characters, over the "
                             f"{gate.max_chars}-character limit. Do not promise a "
-                            "voice and do not write anything else."
+                            "voice."
                         )
             except Exception:
                 logger.warning(
