@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.13.4
+
+- **修复：v1.13.3 的空输出兜底在生产里从未生效过。** 它用子串匹配找 `EmptyModelOutputError` / `no usable output`，但上游 provider 会在 `openai_source.py:696-703` 把最终异常**吞掉并正常结束**，runner 于是耗尽候选列表，用户实际看到的是 `LLM 响应错误: All available chat models are unavailable.`（`tool_loop_agent_runner.py:656-659`，裸文本）；另一支 `All chat models failed: EmptyModelOutputError: ...` 才是带 marker 的形态。两个 marker 都不在这句上，故 5 天日志里该分支命中 **0 次**，而同期空输出类错误 59 次。11-11 17:36 用户自己引用的那句就是证据：`…Nova都会一直陪在主人身边听的喵~LLM 响应错误: All available chat models are unavailable.`
+- **改成"整链相等 + 全 Plain + 三条件"的单一门控** `_should_swallow_empty_tail`（两处调用点共用：流式 `send_streaming` 包装器、非流式 `on_decorating_result`）：
+  - **整链相等**（`fullmatch`）而非子串包含 ⇒ 一条同时含正文的链**永远不匹配**，"删掉用户回复"在构造上不可达，而不是靠守卫小心避开；
+  - **全 Plain 要求** ⇒ 带图片/语音等媒体的链一律不碰；
+  - 另加两个条件：本回合**已请求语音**、且**已有正文投递**。
+  - **冷回合不再静默**：一个字都没发出去时错误文本**照常显示**——沉默才是真故障，运维必须看得见。这是行为变更（旧代码对该形状无条件丢弃），已在 AGENTS.md 例外 (c) 写明。
+- **忠实保留真实故障。** 族只含那两个可达终态文本，`All chat models failed: <其他异常>` 全部保持可见：`APIConnectionError` / `APITimeoutError` / `PermissionDeniedError` / `InternalServerError` / `RateLimitError` 已由测试逐条钉死。此前用不锚定的子串匹配，会把含 `no usable output` 字样的任一上游响应一并吞掉。
+- **可诊断**：丢弃时记 `WARNING`，带 UMO、已投递长度与被丢弃的原文（截断 200 字），事后可区分"按协议安静"与"真故障被吞"。
+- **修复（P0-1）：工具返回文本去掉"不许再说话"一类祈使句。** `_QUEUED` 由 `"Voice request recorded. Do not write anything else."` 改为 `"Voice request recorded. The system sends the voice as a separate message when it can."`（"when it can" 是刻意的：新措辞不得重新变成投递承诺，否则与描述第 5 条"绝不要告诉用户语音即将到来"自相矛盾）；`_ALREADY_REQUESTED` / `_UNAVAILABLE` / `_UNAVAILABLE_TEXT` / 超限文案同步去掉同类指令，保留"不得重复调用""不得承诺语音"。依据是对照实验：同一上下文只把该句换成中性文本，霓窝/gemini-3.8-flash 由 5 次 4 空变为 10 次 0 空。**工具描述（`_CALL_PROTOCOL`）本轮有意不动**——实验刻意固定了 tools 定义，故不能证明描述里那条祈使句无害，只是它未被变动；如实记录为此项不含"空输出率一定下降"的承诺。已知残留：描述第 4 条 `"The voice is delivered by the system as a separate message."` 仍带投递口吻，与新的结果文本不完全一致，留待后续版本统一。
+- **已知边界（未解决，如实记录）**：① 正文与尾巴合并在同一条 `Plain` 里的形态（本机由 `combine_messages` 产生）**有意不处理**，处理它意味着改写用户可见文本；② 上游把 `finish_reason=content_filter` 与解析失败也会吞成同一句裸文本，故三条件成立时会一并丢弃（该路径本机 0 次发生）；③ Anthropic/Gemini/Responses 的 `…no usable output` 措辞不在族内，保持可见；④ 本机 5 天日志中族文本从未抵达这两处接缝，命中率**未测量**——这是对已观测终态文本的防御性修复。
+- **测试**：`test_benign_error_filter.py` 重写为 25 项（族 4 正例、5 条生产真实故障反例、正文+尾巴、前置 Plain、段落内、媒体链、近似后缀、其他 provider 措辞、三条件全组合、人格级 `custom_error_message` 不吞、`_delivered_text_extra` 的取数守卫（`None`、非 list））；`test_smoke.py` 新增 4 项（未请求语音不吞、冷回合不吞、单链正文+尾巴不吞、丢弃有 WARNING 且含原文）；`test_voice_tool.py` 新增 4 项（返回文本不得含"不许再说话"、仍保留"不得承诺语音/不得重复调用"、`_QUEUED` 说明投递方式且不含承诺语气、描述仍保留排序条款）。全部 10 套件通过（**smoke 64/64**、**voice_tool 22/22**、**benign 25/25**；smoke 从 58 增至 64，新增的 6 项是非流式接缝集成覆盖：丢弃族文本 / 保留真实故障 / 冷回合保留 / 未请求语音保留 / 正文+尾巴保留 / 非 list 取数不满足门控），`ruff format --check` / `ruff check` 干净。
+
 ## v1.13.3
 
 - **修复：模型"守规矩"时，AstrBot 会把 `LLM 响应错误: All chat models failed: EmptyModelOutputError...` 追加到本轮回复末尾。** 工具模式要求模型在 `tvls_send_voice` 之后不再输出文字，模型偶尔真的照做：最终 completion 是 `content=''`、`completion_tokens=0`、`finish_reason='stop'`。AstrBot 把这种**空输出**当成硬失败（`EmptyModelOutputError`），按 provider 逐个重试 + fallback 耗尽后拼出上面那句错误，并在流式输出里**接在已经发出的正文后面**。本插件协议的产物被上游判成故障，与模型/网络是否正常无关（三家 provider 同时返回 `content=''` 就是证据）。

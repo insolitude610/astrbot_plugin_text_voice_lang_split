@@ -10,7 +10,7 @@ AstrBot plugin that translates LLM text before TTS, enabling display in one lang
 | Non-streaming (tool ON) | `on_decorating_result` + `on_llm_response(priority=-1000)` + `after_message_sent(priority=999)` | Decoration delivers **text only** (and always sets `GENERAL_RESULT`, which blocks the built-in TTS). `on_llm_response` marks `_tvls_final_seen`; the `after_message_sent` that follows services the voice from the **delivered** text. An exact all-plain repeat of the delivered text after a tool call is suppressed and the voice is serviced immediately |
 | Streaming | `@filter.on_llm_request` → `@filter.on_llm_response` | `on_llm_request` patches `event.send_streaming`; the wrapper runs the voice follow-up after the stream (`stream_ok` guards a failed stream) |
 
-Key: `on_decorating_result` does NOT fire for `STREAMING_RESULT`. `after_message_sent` does NOT fire for `STREAMING_RESULT` either (RespondStage returns before dispatch), so streaming keeps its own owner.
+Key: `on_decorating_result` does NOT fire for `STREAMING_RESULT` (`result_decorate/stage.py:134-135` returns immediately), but it DOES fire for `STREAMING_FINISH` (`stage.py:137` sets `is_stream=True` and the hooks still run — that is where the repeated "pre-send event hook may not work correctly" warnings come from). `after_message_sent` does NOT fire for `STREAMING_RESULT` (RespondStage returns before dispatch), so streaming keeps its own owner — and, conversely, the non-streaming gate in `on_decorating_result` is the less-exercised of the two here; it remains the only seam for `stream_to_general` platforms (`internal.py:302-305`, `:429-439`). On platforms with `support_streaming_message=False` (e.g. aiocqhttp) `_ship_turn_with_voice` is still reachable under `streaming_response=true` + `"turn_off"`.
 
 Consequence: every outbound change on the streaming path has to happen inside the
 patched `event.send_streaming` — that wrapper is the last hook before the platform
@@ -61,13 +61,26 @@ length. It therefore:
   (`voice_gate_env`), or already-delivered text already over `tts_max_chars`
   (monotonic);
 - otherwise records `_tvls_voice_requested` and answers "Voice request
-  recorded." — never "will be sent";
+  recorded. The system sends the voice as a separate message when it can." —
+  the "when it can" is load-bearing: without it the result text becomes a
+  delivery promise, which the description's item 5 forbids the model to make;
 - is idempotent: a second call is refused without changing state.
+
+The result texts must never contain a "stop writing" order (v1.13.3 shipped
+`"…Do not write anything else."`; upstream providers turned that instruction
+into an empty completion — see the blame-split experiment). `tests/test_voice_tool.py`
+asserts their absence in every result text and pins the required leftovers
+("do not call this tool again", "do not promise a voice").
 
 The description (`build_description(max_chars)` in `tools/voice_tool.py`) states
 the length as **guidance**, tells the model to write the whole reply first and
 call once, and to write nothing afterwards. `main.initialize()` rebuilds it from
 the live config, so the model sees the current cap.
+**Its item 4 (`"After the tool result, output no further text."`) is deliberately
+left unchanged in v1.13.4**, together with its delivery-toned second sentence:
+the blame-split experiment held the `tools` definition constant, so no evidence
+exists about what changing it does to the empty-completion rate, and it is
+model-visible prompt text. Recorded as a known residue in `CHANGELOG.md`.
 
 ### Holding the text until the audio exists (`hold_text_for_voice_timeout`)
 
@@ -174,7 +187,7 @@ log.
    final response while nothing has been delivered yet — that window must stay
    **retryable** (reserving there would skip the merged message and lose the
    voice). A refusal *after* the reservation must stay **consumed**.
-6. **The plugin never rewrites user-visible content, with two narrow exceptions.**
+6. **The plugin never rewrites user-visible content, with three narrow exceptions.**
    Message count belongs to AstrBot (`buffer_intermediate_messages`); a plugin
    cannot remove the pre-tool message. (a) In tool mode with a requested voice,
    an all-plain second message that exactly repeats the last delivered text is
@@ -187,6 +200,58 @@ log.
    so the duplicate has to be handled on the text. Both exceptions require the
    voice environment and the turn-level gate to allow a voice, and neither ever
    touches media, reorders content or edits conversation history.
+   (c) **Dropped AstrBot's benign "empty model output" tail** — see the block
+   below. Only a chain whose every component is `Plain` *and* whose whole
+   concatenated text is family-exact is dropped whole; a chain that carries body
+   text (same `Plain` or a preceding one) or any media can never match, so a
+   reply is never lost and nothing is ever partially rewritten.
+
+### The benign "empty model output" tail (`_should_swallow_empty_tail`)
+
+In voice-tool mode the model is *instructed* to stay silent after
+`tvls_send_voice`, so an empty final completion is the protocol working as
+designed — but AstrBot reports it as a failure. Three conditions must hold
+together before the plugin drops it:
+
+1. `_is_benign_empty_tail(chain)` — the WHOLE chain is exactly one of the two
+   reachable terminal texts:
+   `All available chat models are unavailable.`,
+   `All chat models failed: EmptyModelOutputError: …`,
+   `…completion has no usable output…`. **Every other
+   `All chat models failed: <ExcType>` is a REAL failure and stays visible** —
+   `APIConnectionError`, `APITimeoutError`, `PermissionDeniedError`,
+   `InternalServerError` and `RateLimitError` are all pinned as kept by tests.
+2. `_tvls_voice_requested` — the model asked for a voice this turn.
+3. Body text was already delivered this turn (streaming: the wrapper's
+   `delivered`; non-streaming: `_tvls_pipeline_delivered`). **On a cold turn
+   where nothing reached the user the tail stays visible** — a silent turn is the
+   real failure and must be diagnosable.
+
+A drop logs at `WARNING` with the UMO, the delivered length and the dropped
+text, so "the protocol stayed quiet" is distinguishable from "a real failure was
+swallowed" after the fact.
+
+Known boundaries:
+
+- The provider swallows the terminal exception (`openai_source.py:696-703`), so
+  `finish_reason=content_filter` and parse failures degrade into the same bare
+  text and are dropped too when (2)+(3) hold. That path has fired 0 times in
+  this install (theoretical).
+- Only two competing terminal texts are on the family. Anthropic/Gemini/Responses
+  word it differently (`Anthropic completion has no usable output.`) and their
+  text never reaches the user unwrapped by the runner, so it stays visible.
+- **A body+tail arriving as ONE `Plain` is deliberately not covered.** That shape
+  is produced by a sibling plugin editing the chain (`combine_messages` in this
+  install), not by core, and trimming it would mean rewriting user-visible text.
+  Left visible on purpose.
+- **`buffer_intermediate_messages=true` + non-streaming under-swallows.** The body
+  is buffered and flushed *after* the error chain (`astr_agent_run_util.py:274-309`),
+  so condition 3 reads empty and the tail stays visible. That direction is safe
+  (never over-swallows) and the live install is streaming anyway
+  (`support_streaming_message` defaults True), so it is recorded rather than fixed.
+- Hit rate in this install is unmeasured: the family texts never reached either
+  seam in the 5 days of log available. This is a defensive fix for the observed
+  terminal texts, not a measured regression fix.
 
 
 ## Streaming voice mechanism (v1.5.0+)
@@ -381,7 +446,7 @@ after registration is effective. Toggle `tool.active` to show/hide from the LLM.
 
 ## Tests
 
-Nine test suites, all in `tests/` (gitignored). They must run against the
+Ten test suites, all in `tests/` (gitignored). They must run against the
 **production** modules — v1.13.0 rewrote `tests/test_voice_tool.py` and
 `tests/test_smoke.py` because the old harness copied the tool implementation and
 used a synchronous `MagicMock` for `get_audio`, so a swallowed `TypeError` (and
@@ -404,7 +469,8 @@ $py = "D:\AstrBotLauncher-0.1.5.5\AstrBot\venv\Scripts\python.exe"
 foreach ($t in @("test_translation_context.py", "test_split_parity.py",
                  "test_translation_prompt.py", "test_phase2.py", "test_smoke.py",
                  "test_split_and_toggle.py", "test_voice_tool.py",
-                 "test_filter_text_for_tts.py", "test_strip_thinking.py")) {
+                 "test_filter_text_for_tts.py", "test_strip_thinking.py",
+                 "test_benign_error_filter.py")) {
   & $py "tests\$t"
 }
 
