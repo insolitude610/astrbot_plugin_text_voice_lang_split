@@ -39,16 +39,17 @@ ResultDecorateStage → RespondStage → after_message_sent (the turn's last mes
 ## Voice tool mode (`enable_llm_voice_tool`) — the current design
 
 ### One voice owner
-`on_decorating_result` never voices in tool mode and always sets
-`result.result_content_type = GENERAL_RESULT` + `use_t2i_ = False`. That single
-flag does two jobs: it stops AstrBot's built-in TTS from reading the same reply
-(`is_llm_result()` becomes False), and it marks the message as already
-decided. The plugin's own voice is produced **later**, once:
+`on_decorating_result` always sets `result.result_content_type =
+GENERAL_RESULT` + `use_t2i_ = False`. That single flag stops AstrBot's built-in
+TTS from reading the same reply (`is_llm_result()` becomes False) and marks the
+message as already decided. The plugin's own voice is produced **once**:
 
 ```
-on_llm_response (priority=-1000)  → _tvls_final_seen = True
-                                 → if the final text is empty: service now
-after_message_sent (final msg)   → record shipped text, then service
+hold > 0, final message, voice requested, nothing delivered yet
+    → decoration waits for the audio, then appends `Record`s to that message
+otherwise
+    → on_llm_response (priority=-1000): _tvls_final_seen = True
+      after_message_sent (final msg): record shipped text, then service
 ```
 
 ### Why the tool cannot promise
@@ -94,18 +95,16 @@ TTS) **and** the decorated
 message is the turn's only one (`_tvls_final_seen` set, no
 `_tvls_pipeline_delivered` yet, voice requested, environment and cap gates pass),
 `on_decorating_result` generates the audio first (bounded by that timeout), then
-ships the text and the voice itself and clears the result chain so the pipeline
-ships nothing.
+appends the chunks as `Record`s to the reply chain and returns; the pipeline
+ships ONE message that carries text and voice together.
 
 Rules that keep this safe:
 
-- **The reply is never lost.** The text chain is cleared only **after**
-  `context.send_message` succeeded, and its boolean return is checked; an
-  exception or `False` hands the intact chain back to the pipeline (which then
-  ships the text and services the voice at turn end) and releases the unused
-  audio. Timeout, translation/TTS failure, missing provider and hold=0 all fall
-  through the same way; a timeout and a generation failure additionally reserve
-  `_tvls_deferred_voice_sent`, so the turn-end service never retries the work.
+- **The reply is never lost.** The chain is never cleared: timeout, failure,
+  missing provider and hold=0 all return False with the chain untouched, so the
+  pipeline sends the text exactly as it would have. A timeout and a generation
+  failure additionally reserve `_tvls_deferred_voice_sent`, so the turn-end
+  service never retries the work.
 - **A timeout drops the voice; it never generates twice.** Re-running translate
   + TTS at turn end would translate the same text a second time for a reply the
   user has already read, so the request is consumed and the turn ships text
@@ -113,16 +112,10 @@ Rules that keep this safe:
 - **Only whole turns are held.** A turn whose first bubble already shipped is
   never held (`_tvls_pipeline_delivered` non-empty) — holding the remainder of a
   half-delivered reply looks broken.
-- **Sibling `after_message_sent` hooks must still run.** The pipeline does not
-  fire `OnAfterMessageSentEvent` for a message a plugin sent itself, so the held
-  path calls `_notify_after_message_sent` (`call_event_hook(event,
-  EventType.OnAfterMessageSentEvent)`) after shipping the pair; otherwise
-  queued sibling work (meme images, temp-file cleanup) is dropped silently.
-- **Later decorators do not see a held message.** The plugin sends that one
-  message itself, so handlers registered after it (think tags, splitter, …) are
-  skipped for it, and so are the decorate-stage tail steps (text-to-image) and
-  the chain metadata (`use_t2i_` / `use_markdown_`). Documented trade-off, and
-  the reason the cap keeps held replies short.
+- **The plugin sends nothing itself.** The combined chain goes through
+  `RespondStage`, so later decorators, `use_t2i_`/`use_markdown_` and the
+  sibling `after_message_sent` hooks all run normally; each audio chunk is
+  tracked with `event.track_temporary_local_file`, so the pipeline deletes it.
 - **`_collapse_verbatim_repeat` has one accepted narrow false-positive.** A reply
   that happens to be one sentence duplicated verbatim (≥8-char halves, seam
   after `。？！?!~…`) is collapsed. Gating on tool mode + requested voice +

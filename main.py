@@ -2,7 +2,7 @@ import asyncio
 import re
 
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import MessageChain, filter
+from astrbot.api.event import filter
 from astrbot.api.provider import LLMResponse
 from astrbot.api.star import Context, Star
 from astrbot.core.message.components import Plain, Record
@@ -19,17 +19,6 @@ except Exception:  # pragma: no cover - older AstrBot
     logger.debug(
         "[text_voice_lang_split] CHATUI_SPECIAL_DEFAULT_PERSONA_PROMPT unavailable; "
         "the WebChat special default persona will not be injected"
-    )
-
-try:  # Needed to release sibling plugins' post-send work for held messages.
-    from astrbot.core.pipeline.context import call_event_hook
-    from astrbot.core.star.star_handler import EventType
-except Exception:  # pragma: no cover - layout moved between versions
-    call_event_hook = None
-    EventType = None
-    logger.debug(
-        "[text_voice_lang_split] call_event_hook unavailable; the post-send hook "
-        "will not run for messages the plugin ships itself"
     )
 
 from . import context_utils, text_utils, voice_utils
@@ -561,7 +550,7 @@ class TextVoiceLangSplit(Star):
                 "_tvls_final_seen", False
             ):
                 # The turn's last message and the voice it asks for: wait for
-                # the audio, then ship "text, voice" as one pair.
+                # the audio, then attach it so ONE message carries both.
                 if await self._ship_turn_with_voice(event, result, gate.text):
                     return
             logger.debug(
@@ -767,16 +756,18 @@ class TextVoiceLangSplit(Star):
     async def _ship_turn_with_voice(
         self, event: AstrMessageEvent, result, text: str
     ) -> bool:
-        """Hold the turn's last message until the audio exists, then ship both.
+        """Wait for the audio, then attach it so text and voice ship together.
 
         Translation + TTS take a few seconds, so shipping the text first makes
         the user watch "text … long gap … voice". Holding the text for that long
-        turns it into "text, voice" instead: same total wait, far better flow.
+        and appending the audio as `Record`s lets the pipeline send ONE message
+        that carries both, so they reach the user together instead of seconds
+        apart.
 
-        Returns True only when this method sent the pair itself; the caller then
-        returns with an empty result chain so the pipeline sends nothing. Every
-        other outcome (disabled, timeout, failure, no voice) returns False and
-        leaves the default flow untouched — the text must never be lost.
+        Returns True when the chunks were attached to the reply chain; the
+        caller returns and the pipeline ships the combined message. Every other
+        outcome (disabled, timeout, failure, no voice) returns False with the
+        chain untouched — the text is always sent and never lost.
         """
         try:
             hold_timeout = float(
@@ -842,91 +833,16 @@ class TextVoiceLangSplit(Star):
             )
             return False
 
-        for path, _ in voice:
-            self._temp_manager.track(path)
-        text_chain = MessageChain(chain=list(result.chain))
-
-        # Send the text BEFORE touching the result chain: if this fails the
-        # reply must fall back to the pipeline instead of disappearing.
-        try:
-            text_sent = await self.context.send_message(
-                event.unified_msg_origin, text_chain
-            )
-        except Exception:
-            text_sent = False
-            logger.error(
-                "[text_voice_lang_split] Failed to send the held reply text",
-                exc_info=True,
-            )
-        if text_sent is False:
-            for path, _ in voice:
-                self._temp_manager.release(path)
-            logger.warning(
-                "[text_voice_lang_split] Could not ship the held reply; handing it "
-                "back to the pipeline so the text is never lost (the voice follows "
-                "as usual)"
-            )
-            return False
-
-        # The text is out: from here the pipeline must not send it again.
-        result.chain.clear()
+        for path, chunk_text in voice:
+            event.track_temporary_local_file(path)
+            result.chain.append(Record(file=path, url=path, text=chunk_text))
         event.set_extra("_tvls_deferred_voice_sent", True)
         logger.info(
-            "[text_voice_lang_split] Shipped the held reply text "
-            f"({len(text)} chars): '{text[:60]}'"
-        )
-
-        sent_chunks = 0
-        try:
-            for path, chunk_text in voice:
-                chain = MessageChain()
-                chain.chain = [Record(file=path, url=path, text=chunk_text)]
-                await self.context.send_message(event.unified_msg_origin, chain)
-                sent_chunks += 1
-        except Exception:
-            logger.error(
-                "[text_voice_lang_split] Failed to send the held voice",
-                exc_info=True,
-            )
-            logger.warning(
-                "[text_voice_lang_split] Held voice was only partially sent "
-                f"({sent_chunks}/{len(voice)} chunk(s))"
-            )
-        finally:
-            for path, _ in voice:
-                self._temp_manager.release(path)
-
-        # The pipeline will never fire this for a message it did not send, but
-        # sibling plugins queue work for it (meme_manager flushes its images and
-        # deletes its temp files there), so releasing the pair must run it.
-        await self._notify_after_message_sent(event)
-        logger.info(
-            "[text_voice_lang_split] Shipped the turn's text and voice back-to-back "
-            f"({sent_chunks}/{len(voice)} voice chunk(s), held {len(text)} chars)"
+            "[text_voice_lang_split] Voice ready: attached "
+            f"{len(voice)} chunk(s) to the reply ({len(text)} chars); the pipeline "
+            "ships text and voice as one message"
         )
         return True
-
-    async def _notify_after_message_sent(self, event: AstrMessageEvent) -> None:
-        """Run the core post-send hook for the message this plugin shipped.
-
-        Only needed by the held path: the plugin sends that message itself, so
-        `RespondStage` skips it and never fires `OnAfterMessageSentEvent`. The
-        result chain is already empty by the time this runs, so the hook cannot
-        cause a duplicate send of our text.
-        """
-        if call_event_hook is None or EventType is None:  # pragma: no cover
-            logger.debug(
-                "[text_voice_lang_split] Post-send hook unavailable on this "
-                "AstrBot version; sibling plugins will miss it for held turns"
-            )
-            return
-        try:
-            await call_event_hook(event, EventType.OnAfterMessageSentEvent)
-        except Exception:
-            logger.warning(
-                "[text_voice_lang_split] Post-send hook failed for the held message",
-                exc_info=True,
-            )
 
     async def _maybe_send_turn_voice(self, event: AstrMessageEvent) -> None:
         """Send the turn's voice once, after the turn's text has been delivered.

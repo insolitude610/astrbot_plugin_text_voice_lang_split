@@ -4,7 +4,6 @@ Extracted verbatim from main.py (pre-v1.8.0 split); methods became module
 functions with explicit dependency injection (context, config, event).
 """
 
-import asyncio
 import os
 import time
 from contextlib import asynccontextmanager
@@ -334,9 +333,6 @@ async def send_streaming_follow_up(
 
     for path, _ in voice:
         event.track_temporary_local_file(path)
-
-    delay = config.get("streaming_follow_up_delay", 1.5)
-    await asyncio.sleep(delay)
 
     try:
         for path, chunk_text in voice:

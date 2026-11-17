@@ -66,9 +66,8 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 | `translate_context_max_chars` | `2000` | 注入上下文的字符上限，超出先丢最旧内容，最后兜底截尾；0 表示不限制 |
 | `tts_max_chars` | `0` | 语音朗读的是**本回合用户实际收到的**可朗读文本，超过此值则跳过语音并记 WARNING（多步工具回合会累加）。0 表示不限制 |
 | `remove_patterns` | (见默认值) | TTS 文本过滤正则规则。匹配到的内容在翻译前删除，用于过滤颜文字、装饰符号等视觉噪声 |
-| `streaming_follow_up_delay` | `1.5` | **仅流式回复**：文字流结束后，等这么久再发语音（语音此时已生成完毕），避免文字与语音同时到达。非流式回复不用此项 |
-| `enable_llm_voice_tool` | `false` | LLM 自主判断是否发送语音。开启后注册 `tvls_send_voice` 工具；语音在**本回合最后一条文字真正发出后**作为跟进消息发送 |
-| `hold_text_for_voice_timeout` | `20` | **仅非流式回复**（工具模式，且本回合尚未发出任何文字）：**先压住本回合的文字等语音就绪**，再「先文字、后语音」连着发（把 8.6–12.2s 的文字→语音间隔压到 1.5–3.3s）。本机实测音频就绪 4.97–6.12s，默认 20 ≈ 3 倍余量。**命中超时的代价**：文字被压到超时才发，且本回合**放弃语音**（不重试、不会重复翻译+TTS）。0 = 关闭（文字立即发）。代价：被压住的那条不经过排在其后的装饰插件与 t2i/`use_markdown_`；它们的 `after_message_sent` 钩子仍会被补发 |
+| `enable_llm_voice_tool` | `false` | LLM 自主判断是否发送语音。开启后注册 `tvls_send_voice` 工具；**开启 hold 时**语音会附进本回合最后一条文字一起发出，否则在文字送达后作为回合末跟进消息发送 |
+| `hold_text_for_voice_timeout` | `20` | **仅非流式回复**（工具模式，且本回合尚未发出任何文字）：先压住本回合的文字等语音生成，然后把语音**附进同一条消息**，文字和语音一起送达。本机实测音频就绪 4.97–6.12s，默认 20 ≈ 3 倍余量。**命中超时的代价**：文字被压到超时才发，且本回合**放弃语音**（不重试、不会重复翻译+TTS）。0 = 关闭（文字立即发，语音走回合末跟进） |
 
 **Provider 优先级：** `translate_provider`（手动指定）> 聊天 `/provider` 切换 > 默认 Provider。
 
@@ -86,7 +85,7 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
    - `provider_settings.streaming_response: false`（合并只在**非流式**生效；同时避免在没有流式实现的适配器上走 `STREAMING_RESULT`）
    - `provider_settings.unsupported_streaming_strategy: "realtime_segmenting"`（若仍是 `turn_off`，加上 aiocqhttp 这类 `support_streaming_message=False` 的平台会让 `stream_to_general=True`，**合并直接不生效**）
 
-   改文件后**必须重启** AstrBot（`_load_all_configs` 只在启动时执行；WebUI 保存才会热生效，但流式关闭时那个策略下拉被 schema 的 `condition` 隐藏，面板上点不出来）。生效范围是所有走该配置档、且适配器没有自行塞 `enable_streaming` extra 的平台（`webchat` 会强制流式，因此不受影响、也不会合并）。副作用：该档下**非语音回合**的文字改为回合结束一次性发出；**语音回合**若开了 `hold_text_for_voice_timeout`，则由本插件在装饰阶段末尾等音频就绪后自行发出（不再由管线发）。合并后的多段文本首尾相接，插件不加分隔符，也不会去重（v1.13.1 的抑制只处理跨消息重复；工具模式下的同句重复由 v1.13.2 的文本折叠处理）。
+   改文件后**必须重启** AstrBot（`_load_all_configs` 只在启动时执行；WebUI 保存才会热生效，但流式关闭时那个策略下拉被 schema 的 `condition` 隐藏，面板上点不出来）。生效范围是所有走该配置档、且适配器没有自行塞 `enable_streaming` extra 的平台（`webchat` 会强制流式，因此不受影响、也不会合并）。副作用：该档下**非语音回合**的文字改为回合结束一次性发出；**语音回合**若开了 `hold_text_for_voice_timeout`，则在装饰阶段末尾等音频就绪后把语音附进同一条消息，由管线一起发出。合并后的多段文本首尾相接，插件不加分隔符，也不会去重（v1.13.1 的抑制只处理跨消息重复；工具模式下的同句重复由 v1.13.2 的文本折叠处理）。
 5. **已知排除项**（插件看不到或不会朗读的文本）：`tool_direct_result` 直发的消息、平台侧丢弃的消息、`platform_settings.forward_threshold` 过长触发的**合并转发**（链里没有纯文本）、以及开启「输出工具调用信息」时核心直发的工具状态消息。
 6. **内联路径（工具关闭）** 仍在装饰阶段取文本，读到的是其它插件清洗**之前**的内容。若你同时使用思考标签清理类插件，建议改用工具模式，或把对应正则补进 `remove_patterns`。
 
