@@ -87,9 +87,10 @@ model-visible prompt text. Recorded as a known residue in `CHANGELOG.md`.
 Translate + TTS need a few seconds, so shipping the text immediately makes the
 user watch "text … long gap … voice". When `hold_text_for_voice_timeout > 0`
 (default 20 s ≈ 3× the measured audio-ready time of **4.97–6.12 s**
-(translate 2.27–3.41 s + TTS 2.12–2.89 s, upload excluded); a timeout is
-**worse** than not holding at all because the text waits the full timeout and
-the turn then pays a second translate + TTS) **and** the decorated
+(translate 2.27–3.41 s + TTS 2.12–2.89 s, upload excluded); a timeout delays
+the text by the full timeout **and** drops the turn's voice, which is worse
+than not holding at all for that turn — but never pays a second translate +
+TTS) **and** the decorated
 message is the turn's only one (`_tvls_final_seen` set, no
 `_tvls_pipeline_delivered` yet, voice requested, environment and cap gates pass),
 `on_decorating_result` generates the audio first (bounded by that timeout), then
@@ -103,11 +104,12 @@ Rules that keep this safe:
   exception or `False` hands the intact chain back to the pipeline (which then
   ships the text and services the voice at turn end) and releases the unused
   audio. Timeout, translation/TTS failure, missing provider and hold=0 all fall
-  through the same way. A generation failure additionally reserves
-  `_tvls_deferred_voice_sent` so the turn-end service does not retry the same
-  failing work.
-- **A timeout costs a second generation.** The fallback re-runs translate + TTS
-  at turn end; document that in the config hint instead of hiding it.
+  through the same way; a timeout and a generation failure additionally reserve
+  `_tvls_deferred_voice_sent`, so the turn-end service never retries the work.
+- **A timeout drops the voice; it never generates twice.** Re-running translate
+  + TTS at turn end would translate the same text a second time for a reply the
+  user has already read, so the request is consumed and the turn ships text
+  only; the config hint says so.
 - **Only whole turns are held.** A turn whose first bubble already shipped is
   never held (`_tvls_pipeline_delivered` non-empty) — holding the remainder of a
   half-delivered reply looks broken.

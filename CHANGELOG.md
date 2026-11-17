@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.13.5
+
+- **行为变更：`hold_text_for_voice_timeout` 超时后不再「语音后补」，本回合直接放弃语音。** 旧实现在超时后只丢掉本次结果，回合末的语音服务会从零再跑一次翻译 LLM 和 TTS——同一句文本被翻译两遍，多一次 LLM + TTS 调用，而用户已经被压住拖慢过一次。现在超时分支与生成失败一样占用 `_tvls_deferred_voice_sent`：文字立即照常发出，语音不再重试。代价是超时回合没有语音；换来的是每条回复最多一次翻译，成本与延迟可预期。
+- **可观测**：超时 WARNING 改为 `Voice not ready within Xs; shipping the text now and dropping this turn's voice (no retry: it would translate the same text twice)`，不再宣称回合末会重试；工具模式「只发文字」的 debug 日志改为 `the turn-end service may still voice it`（超时后实际不会）。
+- **文档**：`_conf_schema.json` 的 hint、README、AGENTS.md 同步为「超时 = 文字先发 + 放弃语音」。
+- **测试**：`test_smoke.py` 的 `test_hold_gives_up_on_timeout_and_leaves_the_text_alone` 改为断言请求被消费（`_tvls_deferred_voice_sent is True`）；`test_timeout_costs_a_second_generation_and_still_voices` 重写为 `test_timeout_drops_the_voice_without_a_second_generation`，断言只生成一次、回合末不再补发语音。
+
 ## v1.13.4
 
 - **修复：v1.13.3 的空输出兜底在生产里从未生效过。** 它用子串匹配找 `EmptyModelOutputError` / `no usable output`，但上游 provider 会在 `openai_source.py:696-703` 把最终异常**吞掉并正常结束**，runner 于是耗尽候选列表，用户实际看到的是 `LLM 响应错误: All available chat models are unavailable.`（`tool_loop_agent_runner.py:656-659`，裸文本）；另一支 `All chat models failed: EmptyModelOutputError: ...` 才是带 marker 的形态。两个 marker 都不在这句上，故 5 天日志里该分支命中 **0 次**，而同期空输出类错误 59 次。11-11 17:36 用户自己引用的那句就是证据：`…Nova都会一直陪在主人身边听的喵~LLM 响应错误: All available chat models are unavailable.`

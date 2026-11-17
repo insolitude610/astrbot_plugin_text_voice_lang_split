@@ -566,7 +566,7 @@ class TextVoiceLangSplit(Star):
                     return
             logger.debug(
                 "[text_voice_lang_split] Voice tool mode: delivering text only; "
-                "the voice is serviced at turn end"
+                "the turn-end service may still voice it"
             )
             return
 
@@ -820,12 +820,15 @@ class TextVoiceLangSplit(Star):
                 timeout=hold_timeout,
             )
         except asyncio.TimeoutError:
+            # Consume this turn's voice request: retrying at turn end would
+            # translate the same text a second time, doubling the LLM + TTS
+            # cost for a reply the user has already read. A dropped voice is
+            # the cheaper, more predictable failure.
+            event.set_extra("_tvls_deferred_voice_sent", True)
             logger.warning(
                 "[text_voice_lang_split] Voice not ready within "
-                f"{hold_timeout:g}s; shipping the text now. The turn-end service "
-                "will generate the voice again, so this turn costs one extra "
-                "translate + TTS call (raise hold_text_for_voice_timeout if it "
-                "keeps happening)"
+                f"{hold_timeout:g}s; shipping the text now and dropping this "
+                "turn's voice (no retry: it would translate the same text twice)"
             )
             return False
 

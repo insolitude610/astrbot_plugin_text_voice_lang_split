@@ -24,7 +24,7 @@
 - 跨平台通用（Windows / macOS / Linux）
 - WebUI 可视化配置
 - TTS 前自动过滤不适合朗读的内容（颜文字、代码块、URL、Markdown 格式等），仅剥离视觉噪声，不做机械替换
-- **可选注入人格与最近对话上下文**：翻译时可带上人格和/或最近 5 轮对话作为只读参考，让译文更贴人物语气与情绪；默认关闭，保持最快路径
+- **可选注入人格与最近对话上下文**：翻译时可带上人格和/或最近几轮对话作为只读参考（轮数可配），让译文更贴人物语气与情绪；默认关闭，保持最快路径
 - 自动剥离翻译 LLM 输出的思考/推理内容（`<think>...</think>` 块、` response 标记等），防止推理模型将内心独白混入语音
 - 翻译失败/超时/原文过长自动静默，不中断正常对话
 - 自动检测 Agent Live 模式并跳过插件 TTS，避免与内置分句 TTS 冲突导致 429
@@ -61,14 +61,14 @@ git clone https://github.com/insolitude610/astrbot_plugin_text_voice_lang_split
 | `emotion_intensity` | `universal_safe` | 情绪/表演标记策略，**面板里是下拉选择**。⚠️ 只有「无标记」对任意 TTS 供应商都安全，其余档位都会向译文写入标记，**只有确认你的 TTS 能解释这些标记时才可选**。<br>「无标记」`universal_safe`（默认）：纯文本，任意供应商<br>「Drama 3 导演」`drama3`：自由导演 + 音效 + 成对标签（需 `drama-3-preview`）<br>「标准情绪标签」`auto`：情绪句加一个 `[标签]`（Fish Audio S2 系）<br>「强化情绪标签」`expressive`：情绪句必加标签（Fish Audio S2 系）<br>「保守情绪标签」`restrained`：通常不加标签（Fish Audio S2 系）<br>格式错误或不在列表中的值按「无标记」处理 |
 | `translate_provider` | (空) | 翻译用 LLM Provider，留空则复用当前聊天的 Provider |
 | `translate_timeout` | `30` | 翻译请求超时(秒)，超时后自动重试一次（间隔 0.5s），设为 0 关闭超时 |
-| `translate_context_mode` | `off` | 翻译参考注入模式，**面板里是下拉选择**。`off` 关闭（默认，最快）；`persona` 仅注入人格；`persona_context` 人格 + 最近 5 轮上下文（最贴情绪，token/延迟最高）。格式错误按「关闭」处理 |
+| `translate_context_mode` | `off` | 翻译参考注入模式，**面板里是下拉选择**。`off` 关闭（默认，最快）；`persona` 仅注入人格；`persona_context` 人格 + 最近几轮上下文（轮数由 `translate_context_rounds` 控制，最贴情绪，token/延迟最高）。格式错误按「关闭」处理 |
 | `translate_context_rounds` | `5` | `persona_context` 模式下注入的对话轮数（1 条用户消息及其回复算 1 轮，最多 20） |
 | `translate_context_max_chars` | `2000` | 注入上下文的字符上限，超出先丢最旧内容，最后兜底截尾；0 表示不限制 |
 | `tts_max_chars` | `0` | 语音朗读的是**本回合用户实际收到的**可朗读文本，超过此值则跳过语音并记 WARNING（多步工具回合会累加）。0 表示不限制 |
 | `remove_patterns` | (见默认值) | TTS 文本过滤正则规则。匹配到的内容在翻译前删除，用于过滤颜文字、装饰符号等视觉噪声 |
-| `streaming_follow_up_delay` | `1.5` | 语音跟进的延迟(秒)：流式发送完毕后、以及工具模式下最后一条文字发出后，等待此时间再发语音 |
+| `streaming_follow_up_delay` | `1.5` | **仅流式回复**：文字流结束后，等这么久再发语音（语音此时已生成完毕），避免文字与语音同时到达。非流式回复不用此项 |
 | `enable_llm_voice_tool` | `false` | LLM 自主判断是否发送语音。开启后注册 `tvls_send_voice` 工具；语音在**本回合最后一条文字真正发出后**作为跟进消息发送 |
-| `hold_text_for_voice_timeout` | `20` | 工具模式下，**先压住本回合的文字等语音就绪**，再「先文字、后语音」连着发（把 8.6–12.2s 的文字→语音间隔压到 1.5–3.3s）。本机实测音频就绪 4.97–6.12s，默认 20 ≈ 3 倍余量。**命中超时比不压住更差**：文字被压到超时才发，且回合末会**再生成一次**翻译+TTS（多一次调用）。0 = 关闭（文字立即发）。代价：被压住的那条不经过排在其后的装饰插件与 t2i/`use_markdown_`；它们的 `after_message_sent` 钩子仍会被补发 |
+| `hold_text_for_voice_timeout` | `20` | **仅非流式回复**（工具模式，且本回合尚未发出任何文字）：**先压住本回合的文字等语音就绪**，再「先文字、后语音」连着发（把 8.6–12.2s 的文字→语音间隔压到 1.5–3.3s）。本机实测音频就绪 4.97–6.12s，默认 20 ≈ 3 倍余量。**命中超时的代价**：文字被压到超时才发，且本回合**放弃语音**（不重试、不会重复翻译+TTS）。0 = 关闭（文字立即发）。代价：被压住的那条不经过排在其后的装饰插件与 t2i/`use_markdown_`；它们的 `after_message_sent` 钩子仍会被补发 |
 
 **Provider 优先级：** `translate_provider`（手动指定）> 聊天 `/provider` 切换 > 默认 Provider。
 
@@ -133,9 +133,9 @@ Drama 3 是目前 Fish Audio 最强的表演模型，支持用自然语言"导�
 |------|----------|----------|
 | `off`（默认） | 不注入 | 追求最快、最省 token，或不想把聊天内容发给翻译 Provider |
 | `persona` | 当前人格提示词 | 只想让人物的语气更稳定 |
-| `persona_context` | 当前人格 + 最近 5 轮对话 | 长对话、情绪起伏大，希望译文承接上一轮的语境 |
+| `persona_context` | 当前人格 + 最近几轮对话（默认 5 轮） | 长对话、情绪起伏大，希望译文承接上一轮的语境 |
 
-- **「5 轮」的定义**：最近 5 条用户消息以及它们对应的回复（1 条用户消息 + 它的回复 = 1 轮）。历史在 **LLM 请求发出前** 快照，不包含本轮正在翻译的回复；人格开场白（`begin_dialogs`）会被排除，不会被当成真实聊天记录。
+- **轮数的定义**：由 `translate_context_rounds` 控制（默认 5 轮，最多 20 轮）——最近 N 条用户消息以及它们对应的回复（1 条用户消息 + 它的回复 = 1 轮）。历史在 **LLM 请求发出前** 快照，不包含本轮正在翻译的回复；人格开场白（`begin_dialogs`）会被排除，不会被当成真实聊天记录。
 - **预算**：`translate_context_max_chars`（默认 2000，非零值最小按 200 生效）先丢最旧内容，仍超限则保留尾部，避免把 `translate_timeout` 打爆。上下文很长或翻译经常超时，可调小轮数/预算，或调大 `translate_timeout`。
 - **隐私**：人格与聊天内容会随翻译请求发给你配置的翻译 Provider。若 `translate_provider` 与聊天 Provider 不是同一个，请确认你可以接受这些内容到达该服务商。
 - **适用范围**：只有本地 Agent Runner 才有本地对话历史，也才会注入参考内容；dify / coze / dashscope 这类第三方 runner 不提供本地上下文与 conversation，此时**不会注入任何参考**（按纯翻译处理）。人格注入还需要 AstrBot 支持 `PersonaManager.resolve_selected_persona`：不支持的旧版本会打印一次警告，此时 `persona_context` 只注入上下文，`persona` 模式不注入任何内容。
